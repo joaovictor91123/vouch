@@ -6,10 +6,15 @@ buffer (`.vouch/captures/<session>.jsonl`); `finalize` rolls the buffer plus a
 git-diff backstop into a single session-summary page proposal that a human
 approves like any other write. The tool-activity path never calls approve().
 
-`capture_answer` is the one exception, and it stays inside the gate: it ingests
-a session's answer as a source, files receipt-backed claims, and self-approves
-only what `proposals.approve` already allows (trusted-agent or the receipt
-gate). With neither opt-in set it too leaves the claims pending. See
+Answer memory is the one path that files claims, and it stays inside the gate:
+a session's answers are ingested as a source, receipt-backed claims are filed,
+and self-approval clears only what `proposals.approve` already allows
+(trusted-agent or the receipt gate). With neither opt-in set the claims stay
+pending. `capture.answer_mode` picks the extraction unit: "session" (default)
+extracts once at SessionEnd from the full transcript via
+`capture_session_answers`, so spans are cut with every turn in view and a
+single per-session claim budget; "turn" restores the legacy per-Stop-hook
+`capture_answer`, which sees one answer at a time. See
 docs/superpowers/specs/2026-07-01-vouch-session-autocapture-design.md and
 docs/superpowers/specs/2026-07-16-passive-answer-memory-design.md
 """
@@ -33,6 +38,10 @@ from .storage import KBStore
 DEFAULT_ENABLED = True
 DEFAULT_MIN_OBSERVATIONS = 3
 DEFAULT_DEDUP_WINDOW_SECONDS = 60.0
+# "session": claims are extracted once at SessionEnd from the full transcript.
+# "turn": legacy behaviour — claims filed from each answer on every Stop hook.
+DEFAULT_ANSWER_MODE = "session"
+_ANSWER_MODES = frozenset({"session", "turn"})
 CAPTURE_ACTOR = "vouch-capture"
 CAPTURE_PAGE_TYPE = "session"
 
@@ -42,6 +51,7 @@ class CaptureConfig:
     enabled: bool = DEFAULT_ENABLED
     min_observations: int = DEFAULT_MIN_OBSERVATIONS
     dedup_window_seconds: float = DEFAULT_DEDUP_WINDOW_SECONDS
+    answer_mode: str = DEFAULT_ANSWER_MODE
 
 
 def load_config(store: KBStore) -> CaptureConfig:
@@ -55,12 +65,16 @@ def load_config(store: KBStore) -> CaptureConfig:
     raw = loaded.get("capture")
     if not isinstance(raw, dict):
         return CaptureConfig()
+    answer_mode = str(raw.get("answer_mode", DEFAULT_ANSWER_MODE)).strip().lower()
+    if answer_mode not in _ANSWER_MODES:
+        answer_mode = DEFAULT_ANSWER_MODE
     return CaptureConfig(
         enabled=bool(raw.get("enabled", DEFAULT_ENABLED)),
         min_observations=int(raw.get("min_observations", DEFAULT_MIN_OBSERVATIONS)),
         dedup_window_seconds=float(
             raw.get("dedup_window_seconds", DEFAULT_DEDUP_WINDOW_SECONDS)
         ),
+        answer_mode=answer_mode,
     )
 
 
@@ -358,6 +372,69 @@ def last_exchange(
     return q, a
 
 
+DEFAULT_MAX_SESSION_CHARS = 100_000
+
+
+def session_history(
+    transcript_path: Path,
+    *,
+    max_question_chars: int = 240,
+    max_answer_chars: int = 20000,
+    max_session_chars: int = DEFAULT_MAX_SESSION_CHARS,
+) -> tuple[list[str], str] | None:
+    """Every (question, answer) exchange of a transcript, as one document.
+
+    Pure extraction — no model. Each exchange keeps only the turn's final
+    assistant text (the same "the last text row is the answer" rule as
+    ``last_exchange``, applied per turn). Returns ``(questions, document)``
+    where the document is the answers joined by blank lines; questions stay
+    out of the document so a receipt-backed claim can only ever quote
+    assistant prose. Over ``max_session_chars`` the oldest exchanges are
+    dropped first — the tail of a session is where its conclusions live.
+    None when the transcript has no assistant answer at all.
+    """
+    try:
+        fh = transcript_path.open(encoding="utf-8")
+    except OSError:
+        return None
+    exchanges: list[tuple[str, str]] = []
+    question: str | None = None
+    answer: str | None = None
+    with fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            user = _genuine_user_text(obj)
+            if user is not None:
+                if answer is not None:
+                    exchanges.append((question or "", answer))
+                question, answer = user, None
+                continue
+            text = _assistant_text(obj)
+            if text is not None:
+                answer = text
+    if answer is not None:
+        exchanges.append((question or "", answer))
+    if not exchanges:
+        return None
+    kept: list[tuple[str, str]] = []
+    total = 0
+    for q, a in reversed(exchanges):
+        a = a[:max_answer_chars].rstrip()
+        if kept and total + len(a) > max_session_chars:
+            break
+        kept.append((_excerpt(q, max_chars=max_question_chars), a))
+        total += len(a)
+    kept.reverse()
+    questions = [q for q, _ in kept if q]
+    document = "\n\n".join(a for _, a in kept)
+    return questions, document
+
+
 def _excerpt(prompt: str, *, max_chars: int = 64) -> str:
     if len(prompt) <= max_chars:
         return prompt
@@ -460,15 +537,29 @@ def finalize(
     ``origin`` marks a personal-KB fallback rollup (see ``capture_answer``):
     the filed summary records the folder the session ran in, so a shared
     personal KB's review queue says which folder each summary is about.
+
+    Under ``capture.answer_mode: session`` (the default) this is also where
+    answer memory happens: the full transcript is handed to
+    ``capture_session_answers`` once, instead of a Stop hook filing claims
+    on every turn. A claim-extraction failure never loses the summary.
     """
     from . import session_split  # deferred: breaks the capture<->session_split cycle
+    cfg = config or load_config(store)
     intent = (
         first_user_prompt(transcript_path) if transcript_path is not None else None
     )
-    return session_split.summarize(
+    result = session_split.summarize(
         store, session_id, intent=intent, cwd=cwd, project=project,
-        generated_at=generated_at, mode=mode, config=config, origin=origin,
+        generated_at=generated_at, mode=mode, config=cfg, origin=origin,
     )
+    if transcript_path is not None and cfg.answer_mode == "session":
+        try:
+            result["answers"] = capture_session_answers(
+                store, session_id, transcript_path, config=cfg, origin=origin,
+            )
+        except Exception:
+            result["answers"] = _answer_skip(session_id, "error")
+    return result
 
 
 ANSWER_ACTOR = CAPTURE_ACTOR
@@ -495,14 +586,18 @@ def capture_answer(
 ) -> dict[str, Any]:
     """Turn a session's latest Q&A into durable, recallable knowledge.
 
-    Fires from a host Stop hook (the turn just finished). Extracts the last
-    exchange, ingests the *answer* as a content-addressed source, files a
-    receipt-backed claim per quotable span (``extract.extract_receipt_claims``),
-    and approves each one the review gate allows — self-approval clears under
-    ``review.approver_role: trusted-agent`` or, for these verbatim-quoting
-    claims, ``review.auto_approve_on_receipt`` (the starter-config default).
-    With neither gate on the claims stay pending: the review gate is
-    honoured, never bypassed.
+    The ``capture.answer_mode: turn`` path only. Fires from a host Stop hook
+    (the turn just finished). Under the default ``session`` mode it defers —
+    ``finalize`` extracts once from the full transcript instead
+    (``capture_session_answers``) — so a Stop hook can stay wired regardless
+    of mode. In turn mode it extracts the last exchange, ingests the *answer*
+    as a content-addressed source, files a receipt-backed claim per quotable
+    span (``extract.extract_receipt_claims``), and approves each one the
+    review gate allows — self-approval clears under ``review.approver_role:
+    trusted-agent`` or, for these verbatim-quoting claims,
+    ``review.auto_approve_on_receipt`` (the starter-config default). With
+    neither gate on the claims stay pending: the review gate is honoured,
+    never bypassed.
 
     Idempotent and quiet by design: an answer already ingested (same bytes) is
     skipped, and answers shorter than ``min_answer_chars`` (acknowledgements)
@@ -528,6 +623,12 @@ def capture_answer(
     cfg = config or load_config(store)
     if not cfg.enabled:
         return _answer_skip(session_id, "disabled")
+    if cfg.answer_mode != "turn":
+        # session mode: finalize extracts once from the whole transcript
+        # (capture_session_answers). Per-turn extraction would cut claims with
+        # single-answer context — the "noted at the end" class of fragment —
+        # and no cross-turn dedup or budget.
+        return _answer_skip(session_id, "deferred-to-session-end")
 
     exchange = last_exchange(transcript_path)
     if exchange is None:
@@ -569,6 +670,92 @@ def capture_answer(
         claim = proposals_mod.resolve_pending_receipt_claim(
             store, result.proposal, actor=ANSWER_ACTOR,
             reason="auto-captured session answer (receipt verified)",
+        )
+        if claim is not None:
+            approved += 1
+    return {
+        "captured": True, "skipped": None, "session_id": session_id,
+        "source": source.id, "filed": len(filed), "approved": approved,
+    }
+
+
+def capture_session_answers(
+    store: KBStore,
+    session_id: str,
+    transcript_path: Path,
+    *,
+    min_answer_chars: int = DEFAULT_MIN_ANSWER_CHARS,
+    max_claims: int = DEFAULT_MAX_ANSWER_CLAIMS,
+    config: CaptureConfig | None = None,
+    origin: Path | None = None,
+) -> dict[str, Any]:
+    """Turn a whole session's answers into durable, recallable knowledge.
+
+    The session-mode counterpart of ``capture_answer``, run once from
+    ``finalize`` (SessionEnd) instead of on every Stop hook. The full
+    transcript is the extraction unit: spans are selected with every turn in
+    view, identical spans collapse across turns, and ``max_claims`` bounds
+    the session rather than each turn. The gate story is unchanged —
+    receipt-verified claims self-approve only where ``proposals.approve``
+    already allows it (trusted-agent or ``review.auto_approve_on_receipt``),
+    everything else stays pending.
+
+    Idempotent the same way ``capture_answer`` is: the assembled history is
+    content-addressed, so re-finalizing an unchanged transcript skips.
+    ``origin`` marks a personal-KB fallback capture, recorded on the source
+    for `vouch adopt`.
+    """
+    import os
+
+    from . import extract as extract_mod
+    from . import proposals as proposals_mod
+    from .storage import ArtifactNotFoundError, sha256_hex
+
+    if os.environ.get("VOUCH_CAPTURE_DISABLE") == "1":
+        return _answer_skip(session_id, "disabled-env")
+    cfg = config or load_config(store)
+    if not cfg.enabled:
+        return _answer_skip(session_id, "disabled")
+
+    history = session_history(transcript_path)
+    if history is None:
+        return _answer_skip(session_id, "no-answer")
+    questions, document = history
+    if len(document) < min_answer_chars:
+        return _answer_skip(session_id, "answer-too-short")
+
+    content = document.encode("utf-8")
+    sid = sha256_hex(content)
+    try:
+        store.get_source(sid)
+        return _answer_skip(session_id, "already-captured")
+    except ArtifactNotFoundError:
+        pass
+
+    tags = ["session-answer", "session-history"]
+    metadata: dict[str, Any] = {"session_id": session_id, "questions": questions}
+    if questions:
+        # same key the turn path writes, so downstream readers keep working.
+        metadata["question"] = questions[0]
+    if origin is not None:
+        tags.append("personal-fallback")
+        metadata["origin_path"] = str(origin)
+    source = store.put_source(
+        content,
+        title=questions[0] if questions else f"session {session_id} answers",
+        source_type="message",
+        tags=tags,
+        metadata=metadata,
+        scope=proposals_mod.default_scope(store),
+    )
+    filed = extract_mod.extract_receipt_claims(
+        store, source.id, proposed_by=ANSWER_ACTOR, limit=max_claims,
+    )
+    approved = 0
+    for result in filed:
+        claim = proposals_mod.resolve_pending_receipt_claim(
+            store, result.proposal, actor=ANSWER_ACTOR,
+            reason="auto-captured session history (receipt verified)",
         )
         if claim is not None:
             approved += 1

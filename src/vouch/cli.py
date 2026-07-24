@@ -2937,7 +2937,12 @@ def capture_observe_cmd() -> None:
 @capture.command("finalize")
 @click.option("--session-id", default=None, help="Session id (else read from stdin payload).")
 def capture_finalize_cmd(session_id: str | None) -> None:
-    """Roll a session buffer into a PENDING summary (SessionEnd hook payload on stdin)."""
+    """Roll a session buffer into a PENDING summary (SessionEnd hook payload on stdin).
+
+    Under capture.answer_mode: session (the default) this also extracts
+    receipt-backed claims once from the full transcript history, replacing
+    the per-turn Stop-hook extraction.
+    """
     payload: dict[str, Any] = {}
     if not sys.stdin.isatty():
         raw = sys.stdin.read()
@@ -2978,6 +2983,9 @@ def capture_answer_cmd(session_id: str | None) -> None:
     answer is ingested as a source and its receipt-backed claims are
     auto-approved when review.auto_approve_on_receipt is on (the
     starter-config default) or under trusted-agent, else left pending.
+    Under capture.answer_mode: session (the default) this defers — claims are
+    extracted once at SessionEnd from the full transcript by `capture
+    finalize` — and only capture.answer_mode: turn files claims per turn.
     Always exits 0 so a capture failure can never break the turn.
     """
     if sys.stdin.isatty():

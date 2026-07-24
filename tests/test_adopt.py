@@ -60,6 +60,7 @@ def _fallback_capture(personal: KBStore, origin: Path, tmp_path: Path) -> dict:
     )
     result = capture.capture_answer(
         personal, f"s-{origin.name}", transcript, origin=origin,
+        config=capture.CaptureConfig(answer_mode="turn"),
     )
     assert result["captured"] is True
     return result

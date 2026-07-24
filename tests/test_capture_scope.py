@@ -140,7 +140,10 @@ def test_captured_answer_source_is_stamped(store: KBStore) -> None:
         + "\n",
         encoding="utf-8",
     )
-    result = capture.capture_answer(store, "sess-scope", transcript, min_answer_chars=40)
+    result = capture.capture_answer(
+        store, "sess-scope", transcript, min_answer_chars=40,
+        config=capture.CaptureConfig(answer_mode="turn"),
+    )
     assert result.get("captured"), result
     source = store.get_source(result["source"])
     assert source.scope.project == _kb_project(store)

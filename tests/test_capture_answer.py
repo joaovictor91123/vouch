@@ -1,10 +1,16 @@
-"""Passive answer-memory: transcript extraction + capture_answer.
+"""Passive answer-memory: transcript extraction + capture paths.
 
-`capture_answer` turns a session's latest Q&A into receipt-backed claims and
-self-approves only what the review gate already allows (trusted-agent or
-auto_approve_on_receipt); with neither opt-in the claims stay pending. It is
-idempotent (same answer bytes) and quiet (skips short acknowledgements), so a
-Stop hook firing every turn does not duplicate or flood the KB.
+Two extraction units, picked by `capture.answer_mode`:
+
+* "session" (default) — `capture_session_answers`, run once from `finalize`,
+  cuts claims from the full transcript history; the per-turn Stop hook defers.
+* "turn" (legacy) — `capture_answer` files claims from each answer as the
+  Stop hook fires.
+
+Both self-approve only what the review gate already allows (trusted-agent or
+auto_approve_on_receipt); with neither opt-in the claims stay pending. Both
+are idempotent (content-addressed source bytes) and quiet (skip short
+acknowledgements), so neither duplicates nor floods the KB.
 """
 
 from __future__ import annotations
@@ -26,6 +32,9 @@ ANSWER = (
     "Passive session capture saves a session answer and recalls it in a fresh session."
 )
 QUESTION = "what's vouch roadmap?"
+
+# per-turn (legacy) mode, pinned explicitly by the capture_answer tests.
+TURN = cap.CaptureConfig(answer_mode="turn")
 
 
 def _transcript(tmp_path: Path, rows: list[dict]) -> Path:
@@ -113,7 +122,7 @@ def test_last_exchange_missing_file(tmp_path: Path) -> None:
 def test_capture_answer_approves_under_receipt_gate(store: KBStore, tmp_path: Path) -> None:
     _enable_receipt_gate(store)
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is True
     assert res["filed"] >= 3
     assert res["approved"] == res["filed"]
@@ -129,7 +138,7 @@ def test_capture_answer_approves_under_receipt_gate(store: KBStore, tmp_path: Pa
 def test_capture_answer_approves_under_trusted_agent(store: KBStore, tmp_path: Path) -> None:
     _enable_trusted_agent(store)
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is True
     assert res["approved"] == res["filed"] >= 3
 
@@ -140,7 +149,7 @@ def test_capture_answer_leaves_pending_when_gate_off(store: KBStore, tmp_path: P
         "review:\n  auto_approve_on_receipt: false\n", encoding="utf-8"
     )
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is True
     assert res["filed"] >= 3
     assert res["approved"] == 0
@@ -155,7 +164,7 @@ def test_capture_answer_recapture_leaves_no_pending_duplicates(
     # a later answer restating already-durable facts must not pile up pending
     # duplicates -- they are closed mechanically (rejected), fresh facts land.
     tp1 = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    first = cap.capture_answer(store, "sess-1", tp1)
+    first = cap.capture_answer(store, "sess-1", tp1, config=TURN)
     assert first["approved"] == first["filed"] >= 3
     assert cap.pending_count(store) == 0
 
@@ -164,7 +173,7 @@ def test_capture_answer_recapture_leaves_no_pending_duplicates(
         "adapter vouch ships."
     )
     tp2 = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER + " " + extra)])
-    second = cap.capture_answer(store, "sess-2", tp2)
+    second = cap.capture_answer(store, "sess-2", tp2, config=TURN)
     assert second["captured"] is True
     # nothing waits for a human: fresh claims approved, restated ones rejected
     # as duplicates of durable claims.
@@ -176,7 +185,7 @@ def test_capture_answer_recapture_leaves_no_pending_duplicates(
 def test_capture_answer_skips_short_answer(store: KBStore, tmp_path: Path) -> None:
     _enable_receipt_gate(store)
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant("done.")])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is False
     assert res["skipped"] == "answer-too-short"
 
@@ -184,10 +193,10 @@ def test_capture_answer_skips_short_answer(store: KBStore, tmp_path: Path) -> No
 def test_capture_answer_is_idempotent(store: KBStore, tmp_path: Path) -> None:
     _enable_receipt_gate(store)
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    first = cap.capture_answer(store, "sess-1", tp)
+    first = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert first["captured"] is True
     # same answer bytes on a second Stop-hook fire -> skipped, no duplicates.
-    second = cap.capture_answer(store, "sess-1", tp)
+    second = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert second["captured"] is False
     assert second["skipped"] == "already-captured"
     assert cap.pending_count(store) == 0
@@ -196,7 +205,7 @@ def test_capture_answer_is_idempotent(store: KBStore, tmp_path: Path) -> None:
 def test_capture_answer_no_answer(store: KBStore, tmp_path: Path) -> None:
     _enable_receipt_gate(store)
     tp = _transcript(tmp_path, [_user(QUESTION)])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is False
     assert res["skipped"] == "no-answer"
 
@@ -207,6 +216,168 @@ def test_capture_answer_disabled_by_env(
     _enable_receipt_gate(store)
     monkeypatch.setenv("VOUCH_CAPTURE_DISABLE", "1")
     tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
-    res = cap.capture_answer(store, "sess-1", tp)
+    res = cap.capture_answer(store, "sess-1", tp, config=TURN)
     assert res["captured"] is False
     assert res["skipped"] == "disabled-env"
+
+
+# --- session-mode answer memory -------------------------------------------
+
+ANSWER2 = (
+    "The observation buffer feeds passive capture across every host adapter "
+    "vouch ships. Session-mode extraction cuts claims with the whole "
+    "transcript in view instead of one answer at a time."
+)
+
+
+def test_capture_answer_defers_by_default(store: KBStore, tmp_path: Path) -> None:
+    # the default answer_mode is "session": the Stop hook stays wired but
+    # files nothing — finalize owns claim extraction.
+    _enable_receipt_gate(store)
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    res = cap.capture_answer(store, "sess-1", tp)
+    assert res["captured"] is False
+    assert res["skipped"] == "deferred-to-session-end"
+    assert store.list_claims() == []
+    assert store.list_proposals(ProposalStatus.PENDING) == []
+
+
+def test_session_history_collects_all_exchanges(tmp_path: Path) -> None:
+    tp = _transcript(tmp_path, [
+        _user("first question"),
+        _assistant("First answer prose, kept in full."),
+        _user(QUESTION),
+        _assistant(ANSWER),
+    ])
+    got = cap.session_history(tp)
+    assert got is not None
+    questions, doc = got
+    assert questions == ["first question", QUESTION]
+    assert "First answer prose, kept in full." in doc
+    assert "knowledge compiler" in doc
+    # questions never enter the document: claims can only quote answers.
+    assert QUESTION not in doc
+
+
+def test_session_history_keeps_turn_final_message(tmp_path: Path) -> None:
+    # two assistant rows in one turn (narration between tool calls): the
+    # final row is the turn's answer, same rule as last_exchange.
+    tp = _transcript(tmp_path, [
+        _user(QUESTION),
+        _assistant("intermediate narration, superseded"),
+        _assistant(ANSWER),
+    ])
+    got = cap.session_history(tp)
+    assert got is not None
+    _, doc = got
+    assert doc == ANSWER
+
+
+def test_session_history_none_without_assistant(tmp_path: Path) -> None:
+    tp = _transcript(tmp_path, [_user(QUESTION)])
+    assert cap.session_history(tp) is None
+    assert cap.session_history(tmp_path / "nope.jsonl") is None
+
+
+def test_session_history_drops_oldest_over_budget(tmp_path: Path) -> None:
+    tp = _transcript(tmp_path, [
+        _user("q1"), _assistant("old " * 30),
+        _user("q2"), _assistant("new " * 30),
+    ])
+    got = cap.session_history(tp, max_session_chars=150)
+    assert got is not None
+    questions, doc = got
+    # the newest exchange survives; the oldest is dropped first.
+    assert "new" in doc and "old" not in doc
+    assert questions == ["q2"]
+
+
+def test_capture_session_answers_files_claims_under_gate(
+    store: KBStore, tmp_path: Path
+) -> None:
+    _enable_receipt_gate(store)
+    tp = _transcript(tmp_path, [
+        _user(QUESTION), _assistant(ANSWER),
+        _user("what feeds capture?"), _assistant(ANSWER2),
+    ])
+    res = cap.capture_session_answers(store, "sess-1", tp)
+    assert res["captured"] is True
+    assert res["approved"] == res["filed"] >= 4
+    src = store.get_source(res["source"])
+    assert src.metadata["questions"] == [QUESTION, "what feeds capture?"]
+    assert src.metadata["question"] == QUESTION
+    assert "session-history" in src.tags
+    # knowledge from BOTH turns is durable from the one session document.
+    texts = " ".join(c.text.lower() for c in store.list_claims())
+    assert "knowledge compiler" in texts
+    assert "observation buffer" in texts
+
+
+def test_capture_session_answers_leaves_pending_when_gate_off(
+    store: KBStore, tmp_path: Path
+) -> None:
+    store.config_path.write_text(
+        "review:\n  auto_approve_on_receipt: false\n", encoding="utf-8"
+    )
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    res = cap.capture_session_answers(store, "sess-1", tp)
+    assert res["captured"] is True
+    assert res["approved"] == 0
+    assert len(store.list_proposals(ProposalStatus.PENDING)) >= 3
+
+
+def test_capture_session_answers_is_idempotent(store: KBStore, tmp_path: Path) -> None:
+    _enable_receipt_gate(store)
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    first = cap.capture_session_answers(store, "sess-1", tp)
+    assert first["captured"] is True
+    # an unchanged transcript re-finalized -> same bytes, skipped.
+    second = cap.capture_session_answers(store, "sess-1", tp)
+    assert second["captured"] is False
+    assert second["skipped"] == "already-captured"
+    assert cap.pending_count(store) == 0
+
+
+def test_finalize_extracts_claims_from_full_history(
+    store: KBStore, tmp_path: Path
+) -> None:
+    _enable_receipt_gate(store)
+    tp = _transcript(tmp_path, [
+        _user(QUESTION), _assistant(ANSWER),
+        _user("what feeds capture?"), _assistant(ANSWER2),
+    ])
+    res = cap.finalize(store, "sess-1", cwd=None, transcript_path=tp)
+    answers = res["answers"]
+    assert answers["captured"] is True
+    assert answers["filed"] >= 4
+    texts = " ".join(c.text.lower() for c in store.list_claims())
+    assert "knowledge compiler" in texts and "observation buffer" in texts
+
+
+def test_finalize_turn_mode_skips_history_extraction(
+    store: KBStore, tmp_path: Path
+) -> None:
+    _enable_receipt_gate(store)
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    res = cap.finalize(store, "sess-1", cwd=None, transcript_path=tp, config=TURN)
+    assert "answers" not in res
+    assert store.list_claims() == []
+
+
+def test_load_config_answer_mode(store: KBStore) -> None:
+    assert cap.load_config(store).answer_mode == "session"
+    store.config_path.write_text("capture:\n  answer_mode: turn\n", encoding="utf-8")
+    assert cap.load_config(store).answer_mode == "turn"
+    # unknown values fall back to the default rather than half-configuring.
+    store.config_path.write_text("capture:\n  answer_mode: bogus\n", encoding="utf-8")
+    assert cap.load_config(store).answer_mode == "session"
+
+
+def test_capture_session_answers_stamps_origin(store: KBStore, tmp_path: Path) -> None:
+    _enable_receipt_gate(store)
+    origin = tmp_path / "no-kb-project"
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    res = cap.capture_session_answers(store, "sess-1", tp, origin=origin)
+    src = store.get_source(res["source"])
+    assert src.metadata["origin_path"] == str(origin)
+    assert "personal-fallback" in src.tags

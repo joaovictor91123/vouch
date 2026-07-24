@@ -92,6 +92,9 @@ def _starter_config() -> dict[str, Any]:
             # auto-capture agent sessions into pending summaries.
             "enabled": True,
             "min_observations": 3,
+            # answer memory: "session" extracts claims once at SessionEnd from
+            # the full transcript; "turn" files claims on every Stop hook.
+            "answer_mode": "session",
             "split": {
                 # llm topical split for large sessions; llm_cmd falls back to
                 # compile.llm_cmd when null. see session_split.py.
