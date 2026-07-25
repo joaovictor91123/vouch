@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from .config_coerce import coerce_bool
 from .enrich import Enrichment
 from .models import ProposalStatus
 from .secrets import mask_secrets
@@ -70,7 +71,7 @@ def load_config(store: KBStore) -> CaptureConfig:
     if answer_mode not in _ANSWER_MODES:
         answer_mode = DEFAULT_ANSWER_MODE
     return CaptureConfig(
-        enabled=bool(raw.get("enabled", DEFAULT_ENABLED)),
+        enabled=coerce_bool(raw.get("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
         min_observations=int(raw.get("min_observations", DEFAULT_MIN_OBSERVATIONS)),
         dedup_window_seconds=float(
             raw.get("dedup_window_seconds", DEFAULT_DEDUP_WINDOW_SECONDS)

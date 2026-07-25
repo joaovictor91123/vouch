@@ -18,6 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from . import admission, audit, index_db
+from .config_coerce import coerce_bool
 from .models import (
     ArtifactScope,
     Claim,
@@ -513,7 +514,16 @@ def propose_delete(
 
 
 def _review_config(store: KBStore) -> dict[str, Any]:
-    """The ``review:`` section of config.yaml, or {} if absent/unreadable."""
+    """The ``review:`` section of config.yaml, or {} if absent/unreadable.
+
+    ``auto_approve_on_receipt`` is normalized to a real bool here -- the
+    single source of truth every caller below reads from -- so a
+    mistakenly-quoted ``auto_approve_on_receipt: "false"`` in config.yaml
+    can never be silently treated as enabled by one call site while another
+    (correctly) treats the same value as disabled. Callers that still wrap
+    this in their own ``bool(...)`` are unaffected: bool() on an already-real
+    bool is a no-op.
+    """
     try:
         loaded = yaml.safe_load(
             (store.kb_dir / "config.yaml").read_text(encoding="utf-8")
@@ -521,7 +531,11 @@ def _review_config(store: KBStore) -> dict[str, Any]:
     except Exception:
         return {}
     if isinstance(loaded, dict) and isinstance(loaded.get("review"), dict):
-        return loaded["review"]
+        review = dict(loaded["review"])
+        review["auto_approve_on_receipt"] = coerce_bool(
+            review.get("auto_approve_on_receipt"), False
+        )
+        return review
     return {}
 
 
