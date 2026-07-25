@@ -1,4 +1,4 @@
-"""Shared config-boolean coercion.
+"""shared config-boolean coercion.
 
 `bool(x)` on an arbitrary config value is a trap: `yaml.safe_load` resolves
 an *unquoted* `true`/`false` to a real Python bool, but a mistakenly-quoted
@@ -27,7 +27,7 @@ _FALSE_STRINGS = frozenset({"false", "no", "off", "0"})
 
 
 def coerce_bool(value: Any, default: bool) -> bool:
-    """Parse a YAML-sourced config boolean, defaulting on anything unrecognized."""
+    """parse a YAML-sourced config boolean, defaulting on anything unrecognized."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):

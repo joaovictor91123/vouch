@@ -514,13 +514,13 @@ def propose_delete(
 
 
 def _review_config(store: KBStore) -> dict[str, Any]:
-    """The ``review:`` section of config.yaml, or {} if absent/unreadable.
+    """the ``review:`` section of config.yaml, or {} if absent/unreadable.
 
     ``auto_approve_on_receipt`` is normalized to a real bool here -- the
     single source of truth every caller below reads from -- so a
     mistakenly-quoted ``auto_approve_on_receipt: "false"`` in config.yaml
     can never be silently treated as enabled by one call site while another
-    (correctly) treats the same value as disabled. Callers that still wrap
+    (correctly) treats the same value as disabled. callers that still wrap
     this in their own ``bool(...)`` are unaffected: bool() on an already-real
     bool is a no-op.
     """
