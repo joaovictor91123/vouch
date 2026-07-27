@@ -9,14 +9,10 @@
 # values reproduce the repo baseline exactly.
 #
 # dethrone these values by max(0.007, 1.96 * paired SE) over the day's
-# seeds and your PR auto-merges on the ladder branch. allowed keys and
-# bounds are enforced by .github/scripts/validate_kit.py - anything else
-# fails before scoring.
-# round-0 canary: backend deliberately weakened to the substring scan so
-# the first challenger PR exercises the dethrone + auto-merge path end to
-# end. the first restore-to-auto kit PR takes the throne and heals this.
+# seeds and your PR auto-merges. allowed keys and bounds are enforced by
+# .github/scripts/validate_kit.py - anything else fails before scoring.
 retrieval:
-  backend: substring
+  backend: auto
   default_limit: 10
   recency:
     enabled: true
