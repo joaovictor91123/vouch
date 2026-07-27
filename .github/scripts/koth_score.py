@@ -31,7 +31,6 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import statistics
 from pathlib import Path
 
 from vouch import bench
@@ -42,8 +41,8 @@ from vouch import bench
 # the paired diffs are not perfectly normal, so the floor below still does
 # the real gatekeeping when the SE collapses on a deterministic overfit.
 N_SEEDS = 12
-FLOOR = 0.007
-Z = 1.96
+FLOOR = bench.DETHRONE_FLOOR
+Z = bench.DETHRONE_Z
 # bench sleeps this long between session ingests to spread created_at
 # timestamps; keep it small — it is wall-clock, not simulated time. the
 # 3600s that lived here briefly would have out-slept the CI job timeout
@@ -87,40 +86,22 @@ def main() -> int:
 
     champion_scores = score(champion_text, seeds)
     challenger_scores = score(challenger_text, seeds)
-    diffs = [
-        c - r for c, r in zip(challenger_scores, champion_scores, strict=True)
-    ]
-    mean_diff = statistics.mean(diffs)
-    se = (
-        statistics.stdev(diffs) / (len(diffs) ** 0.5)
-        if len(diffs) > 1
-        else 0.0
+    verdict = bench.paired_verdict(
+        champion_scores, challenger_scores, floor=FLOOR, z=Z,
     )
-    band = max(FLOOR, Z * se)
-    dethroned = mean_diff >= band
 
     report = {
         "date": date,
         "base_sha": args.base_sha,
         "seeds": seeds,
-        "champion": {
-            "scores": champion_scores,
-            "mean": statistics.mean(champion_scores),
-        },
-        "challenger": {
-            "scores": challenger_scores,
-            "mean": statistics.mean(challenger_scores),
-        },
-        "mean_diff": mean_diff,
-        "se": se,
-        "band": band,
-        "dethroned": dethroned,
+        "lane": "kit",
+        **verdict,
     }
     text = json.dumps(report, indent=1)
     print(text)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
-    return 0 if dethroned else 3
+    return 0 if report["dethroned"] else 3
 
 
 if __name__ == "__main__":

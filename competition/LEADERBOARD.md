@@ -1,9 +1,11 @@
 # koth ladder — throne history
 
-every row is a dethrone: a kit-only PR that beat the reigning kit by the
-margin band and auto-merged on the ladder branch. the merged PR is the
-authoritative record; this file is the human-readable ledger, appended by
-the maintainer when the monthly season closes and payouts are computed.
+every row is a dethrone: a challenger (kit or engine strategy) that beat
+the reigning champion by the margin band and landed on the ladder branch.
+the merged PR is the authoritative record; this file is the human-readable
+ledger, appended automatically by the `koth-ledger` workflow from the
+gate's scorecard when a win lands (a maintainer can also run
+`.github/scripts/update_leaderboard.py` by hand).
 
 the daily throne is provisional (public seeds — see docs/koth-ladder.md);
 payout rank is settled by the monthly sealed commit-reveal run.

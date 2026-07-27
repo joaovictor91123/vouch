@@ -221,6 +221,7 @@ Pending drafts (`proposed/`) and the derived search index (`state.db`) are gitig
 * `vouch install-mcp <host>` also wires cursor, codex, zed, windsurf, openclaw and friends ([adapters/](adapters/))
 * [vouch webapp](https://github.com/vouchdev/webApp) — the chat-first browser console from the video; [vouch-desktop](https://github.com/vouchdev/vouch-desktop) wraps the same loop as a desktop app
 * [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and the test gate
+* [docs/mining-on-vouch.md](docs/mining-on-vouch.md) — get paid to improve the retrieval engine: submit ranking code, scored by a reproducible benchmark; the best verified strategy ships as the default
 
 ## Incubated by Gittensor
 
