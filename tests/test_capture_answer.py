@@ -407,3 +407,103 @@ def test_finalize_recites_source_on_refinalize(store: KBStore, tmp_path: Path) -
     prop = store.get_proposal(res["summary_proposal_id"])
     assert prop.payload["sources"] == [res["answers"]["source"]]
     assert prop.status is ProposalStatus.PENDING
+
+
+# --- enrichment-driven supersession ----------------------------------------
+
+OLD_ANSWER = (
+    "For the record, the staging region is fenora-3 and every deploy targets it. "
+    "The rollout script reads that value from the environment file at startup. "
+    "Nothing else in the deployment pipeline depends on the region name directly, "
+    "so changing it later only means updating that single configuration entry."
+)
+NEW_ANSWER = (
+    "Heads up: the staging region moved to quvasi-8 as of this week. "
+    "Everything else about the deploy flow stays exactly the same as before. "
+    "The rollout script picked the change up automatically from the environment "
+    "file, so no manual intervention was needed anywhere in the pipeline."
+)
+UPDATE_JSON = (
+    '{"summary": "Staging region changed.", "subjects": [], "updates": '
+    '[{"attribute": "staging region", "old": "fenora-3", "new": "quvasi-8"}]}'
+)
+
+
+def _enrich_stub(tmp_path: Path, output: str) -> str:
+    script = tmp_path / "enrich.sh"
+    script.write_text(
+        f"#!/bin/sh\ncat > /dev/null\ncat <<'JSON'\n{output}\nJSON\n",
+        encoding="utf-8",
+    )
+    return f"sh {script}"
+
+
+def test_finalize_supersedes_updated_claims(store: KBStore, tmp_path: Path) -> None:
+    from vouch.models import ClaimStatus
+
+    store.config_path.write_text(
+        "review:\n  auto_approve_on_receipt: true\n"
+        f'capture:\n  enrich:\n    llm_cmd: "{_enrich_stub(tmp_path, UPDATE_JSON)}"\n',
+        encoding="utf-8",
+    )
+    # session 1 states the old value; its claims become durable via receipts
+    d1 = tmp_path / "s1"
+    d1.mkdir()
+    cap.capture_session_answers(
+        store, "s1", _transcript(d1, [_user("where is staging?"), _assistant(OLD_ANSWER)])
+    )
+    old_claims = [c for c in store.list_claims() if "fenora-3" in c.text]
+    assert len(old_claims) == 1
+
+    # session 2 states the new value; enrichment flags the change
+    d2 = tmp_path / "s2"
+    d2.mkdir()
+    for i in range(3):
+        cap.observe(store, "s2", tool="Edit", summary=f"Edit f{i}.py", now=float(i))
+    res = cap.finalize(
+        store, "s2", cwd=None,
+        transcript_path=_transcript(d2, [_user("region?"), _assistant(NEW_ANSWER)]),
+    )
+    outcomes = res["superseded"]
+    assert [o["applied"] for o in outcomes] == [True]
+    old = store.get_claim(outcomes[0]["old_claim"])
+    new = store.get_claim(outcomes[0]["new_claim"])
+    assert old.status is ClaimStatus.SUPERSEDED
+    assert old.superseded_by == new.id
+    assert "quvasi-8" in new.text
+
+
+def test_apply_updates_gate_closed_touches_nothing(store: KBStore) -> None:
+    # the starter config opts into the receipt gate; close it explicitly
+    store.config_path.write_text(
+        "review:\n  auto_approve_on_receipt: false\n", encoding="utf-8"
+    )
+    out = cap.apply_enrich_updates(
+        store, [{"attribute": "a", "old": "x", "new": "y"}]
+    )
+    assert out == [
+        {"attribute": "a", "old": "x", "new": "y",
+         "applied": False, "reason": "gate-closed"}
+    ]
+
+
+def test_apply_updates_requires_unique_match(store: KBStore, tmp_path: Path) -> None:
+    from vouch.extract import ingest_source
+
+    store.config_path.write_text(
+        "review:\n  auto_approve_on_receipt: true\n", encoding="utf-8"
+    )
+    # "quvasi-8" appears in two separate claims -> ambiguous -> skipped
+    ingest_source(
+        store,
+        b"The region is quvasi-8 for staging deploys. "
+        b"Note that quvasi-8 also hosts the preview environment for the team. "
+        b"The old region fenora-3 is being retired at the end of the month.",
+        proposed_by="test",
+    )
+    out = cap.apply_enrich_updates(
+        store,
+        [{"attribute": "staging region", "old": "fenora-3", "new": "quvasi-8"}],
+    )
+    assert out[0]["applied"] is False
+    assert out[0]["reason"] == "no-unique-claim-match"

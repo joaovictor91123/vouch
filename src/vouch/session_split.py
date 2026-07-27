@@ -194,6 +194,13 @@ def summarize(
         "session_id": session_id, "summarized": final_mode == "mechanical",
         "proposal_id": pid, "enriched": enrichment is not None,
     }
+    if enrichment is not None and enrichment.updates:
+        # Detected value changes ride back to capture.finalize, which owns
+        # supersession (it knows the gate state and the filed claims).
+        result["updates"] = [
+            {"attribute": u.attribute, "old": u.old, "new": u.new}
+            for u in enrichment.updates
+        ]
     if final_mode == "fallback":
         # the LLM was attempted and fell back; the mechanical page is a backstop,
         # but surface the failure so the UI can prompt a retry / config fix.

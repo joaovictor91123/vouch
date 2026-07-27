@@ -584,6 +584,9 @@ def finalize(
     )
     if answers is not None:
         result["answers"] = answers
+    updates = result.get("updates")
+    if updates:
+        result["superseded"] = apply_enrich_updates(store, updates)
     return result
 
 
@@ -792,6 +795,79 @@ def capture_session_answers(
         "captured": True, "skipped": None, "session_id": session_id,
         "source": source.id, "filed": len(filed), "approved": approved,
     }
+
+
+def apply_enrich_updates(
+    store: KBStore, updates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Turn enrichment-detected value changes into supersessions, gate-honouring.
+
+    This is the knowledge-update path: the enrich LLM flags "X changed from
+    old to new"; this resolver maps both verbatim values onto durable claims
+    and links them with ``lifecycle.supersede``, after which the superseded
+    claim leaves every context pack. Precision over recall throughout:
+
+    * runs only under the same self-approval conditions capture's claims use
+      (``review.approver_role: trusted-agent`` or
+      ``review.auto_approve_on_receipt``) — with the gate closed nothing is
+      touched, the human at ``vouch review`` stays the decider;
+    * a value must identify exactly ONE approved claim; zero or several
+      matches skip the update (a hallucinated value matches nothing);
+    * the new claim must be strictly newer than the old one, and distinct.
+
+    Returns one record per attempted update with what happened, for the
+    finalize result and tests.
+    """
+    from . import lifecycle
+    from . import proposals as proposals_mod
+    from .context import _RETRACTED_CLAIM_STATUSES
+
+    review_cfg = proposals_mod._review_config(store)
+    gate_open = review_cfg.get("approver_role") == "trusted-agent" or bool(
+        review_cfg.get("auto_approve_on_receipt")
+    )
+    outcomes: list[dict[str, Any]] = []
+    if not gate_open:
+        return [
+            {**u, "applied": False, "reason": "gate-closed"} for u in updates
+        ]
+    # Durable-and-live claims only: the same statuses retrieval serves.
+    approved = [
+        c for c in store.list_claims()
+        if c.status not in _RETRACTED_CLAIM_STATUSES
+    ]
+
+    def match(value: str) -> Any | None:
+        needle = value.lower()
+        hits = [c for c in approved if needle in c.text.lower()]
+        return hits[0] if len(hits) == 1 else None
+
+    for update in updates[:DEFAULT_MAX_ANSWER_CLAIMS]:
+        old_value = str(update.get("old", ""))
+        new_value = str(update.get("new", ""))
+        record: dict[str, Any] = {**update, "applied": False}
+        old_claim = match(old_value)
+        new_claim = match(new_value)
+        if old_claim is None or new_claim is None:
+            record["reason"] = "no-unique-claim-match"
+        elif old_claim.id == new_claim.id:
+            record["reason"] = "same-claim"
+        elif new_claim.created_at <= old_claim.created_at:
+            record["reason"] = "new-not-newer"
+        else:
+            try:
+                lifecycle.supersede(
+                    store, old_claim_id=old_claim.id,
+                    new_claim_id=new_claim.id, actor=CAPTURE_ACTOR,
+                )
+            except lifecycle.LifecycleError as e:
+                record["reason"] = f"lifecycle: {e}"
+            else:
+                record.update(
+                    applied=True, old_claim=old_claim.id, new_claim=new_claim.id,
+                )
+        outcomes.append(record)
+    return outcomes
 
 
 def pending_count(store: KBStore) -> int:

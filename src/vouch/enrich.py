@@ -67,9 +67,24 @@ class Subject:
 
 
 @dataclass(frozen=True)
+class Update:
+    """A value change the extractor observed: ``attribute`` went old -> new.
+
+    Both values are verbatim strings from the session; downstream matching is
+    strict (a value must identify exactly one durable claim) so a hallucinated
+    update simply matches nothing and is dropped.
+    """
+
+    attribute: str
+    old: str
+    new: str
+
+
+@dataclass(frozen=True)
 class Enrichment:
     summary: str
     subjects: list[Subject] = field(default_factory=list)
+    updates: list[Update] = field(default_factory=list)
 
 
 def _coerce(value: Any, default: Any, cast: Any) -> Any:
@@ -151,12 +166,18 @@ def build_enrich_prompt(
         '{"summary": "<one sentence: what this session accomplished and why '
         'it matters>", "subjects": [{"name": "<short subject name>", '
         '"description": "<one sentence describing the subject>", '
-        '"type": "<person|project|preference|topic|decision>"}]}\n'
+        '"type": "<person|project|preference|topic|decision>"}], '
+        '"updates": [{"attribute": "<what changed>", '
+        '"old": "<verbatim superseded value>", '
+        '"new": "<verbatim current value>"}]}\n'
         "\n"
         "Rules:\n"
         f"- 0 to {max_subjects} subjects; an EMPTY subjects array is a valid "
         "answer — not every session merits subjects.\n"
         "- Keep names short (1-4 words) and descriptions to one sentence.\n"
+        "- updates: ONLY changes the record itself states (a value replaced "
+        "by a newer value). Copy both values verbatim from the record; an "
+        "EMPTY updates array is the normal answer.\n"
         "\n"
         "SESSION RECORD:\n"
         f"{text}"
@@ -215,9 +236,28 @@ def parse_enrichment(raw: str, *, max_subjects: int = DEFAULT_MAX_SUBJECTS) -> E
             subjects.append(Subject(name=name, description=description, type=stype))
             if len(subjects) == max_subjects:
                 break
-    if not summary and not subjects:
+    updates: list[Update] = []
+    raw_updates = value.get("updates")
+    if isinstance(raw_updates, list):
+        for entry in raw_updates:
+            if not isinstance(entry, dict):
+                continue
+            attr = entry.get("attribute")
+            old = entry.get("old")
+            new = entry.get("new")
+            if not (
+                isinstance(attr, str) and isinstance(old, str) and isinstance(new, str)
+            ):
+                continue
+            attr, old, new = attr.strip(), old.strip(), new.strip()
+            if not attr or not old or not new or old.lower() == new.lower():
+                continue
+            updates.append(Update(attribute=attr, old=old, new=new))
+            if len(updates) == max_subjects:
+                break
+    if not summary and not subjects and not updates:
         return None
-    return Enrichment(summary=summary, subjects=subjects)
+    return Enrichment(summary=summary, subjects=subjects, updates=updates)
 
 
 def enrich_session(
