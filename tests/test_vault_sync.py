@@ -360,9 +360,14 @@ def test_cli_sync_deleted_citation_is_clean_error(
     )
     assert result.exit_code != 0
     assert "Traceback" not in result.output
-    assert "Error:" in result.output
-    assert "unknown artifact" in result.output
-    assert "unknown claim id" in result.output
+    # documented CLI contract (#547): exactly one Error: line, not a
+    # multiline non-traceback rendering that still contains "Error:".
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert lines == [
+        "Error: vault edit references unknown artifact: unknown claim id: alpha-claim"
+    ]
+    assert "unknown artifact" in lines[0]
+    assert "unknown claim id" in lines[0]
 
 
 def test_cli_sync_requires_vault_flag(
