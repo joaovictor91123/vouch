@@ -19,7 +19,7 @@ from typing import Any, Literal, cast
 
 import yaml
 
-from . import graph, hot_memory, index_db
+from . import graph, hot_memory, index_db, retrieval_events
 from .embeddings.fusion import rrf_fuse
 from .models import ClaimStatus, ContextItem, ContextPack, ContextQuality
 from .scoping import (
@@ -671,4 +671,10 @@ def build_context_pack(
             {"kind": k, "id": i, "score": sc, "backend": hits[0][4] if hits else "none"}
             for k, i, _sn, sc, _be in hits
         ]
+    # Telemetry, never load-bearing: the flywheel record of what was asked
+    # and what came back (see retrieval_events module docstring).
+    retrieval_events.log_event(
+        store, query=query, backend=str(result["backend"]), limit=limit,
+        budget_chars=max_chars, items=result["items"],
+    )
     return result

@@ -431,8 +431,13 @@ class KBStore:
             schema_version_file.write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         gi = kb.kb_dir / ".gitignore"
         if not gi.exists():
-            # state.db is derived; proposed/ is the agent's scratch space.
-            gi.write_text("proposed/\ncaptures/\nstate.db\nstate.db-*\n", encoding="utf-8")
+            # state.db is derived; proposed/ is the agent's scratch space;
+            # retrieval_events is local telemetry (see retrieval_events.py).
+            gi.write_text(
+                "proposed/\ncaptures/\nretrieval_events.jsonl*\n"
+                "state.db\nstate.db-*\n",
+                encoding="utf-8",
+            )
         return kb
 
     # --- identity ----------------------------------------------------------
