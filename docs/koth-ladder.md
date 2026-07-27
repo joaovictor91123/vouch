@@ -1,4 +1,12 @@
-# the koth ladder — mine on vouch, through a pull request
+# the kit ladder — the 10-minute warm-up lane
+
+> **start here instead: [mining-on-vouch.md](./mining-on-vouch.md).**
+> the main competition is the engine lane
+> ([koth-strategy-lane.md](./koth-strategy-lane.md)) — contributors
+> submit ranking *code* and the best verified strategy ships as the
+> default. this kit ladder is the on-ramp: the same paired scorer over a
+> bounded yaml file, useful for learning the loop, but its ceiling is
+> low by construction — most single knobs cannot move the bench.
 
 ditto onboards contributors by letting miners tweak a retrieval starter
 kit, scoring the result, and paying whoever holds the throne. the vouch

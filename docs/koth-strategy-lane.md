@@ -1,10 +1,19 @@
 # the engine lane - submit ranking code, not config
 
-the kit ladder (docs/koth-ladder.md) lets contributors tune coefficients.
-this lane is the ditto-equivalent: contributors submit **real engine code** -
+**this is the main competition.** (new? start with the walkthrough in
+[mining-on-vouch.md](./mining-on-vouch.md).) the kit ladder
+(docs/koth-ladder.md) is the warm-up lane for tuning coefficients; this
+lane is the ditto-equivalent: contributors submit **real engine code** -
 a retrieval strategy that decides the order the reader sees candidates in -
 and the benchmark scores it. it is the place a new fusion, a learned reranker,
-or a novel signal actually competes.
+or a novel signal actually competes. practice locally with the exact CI
+scoring loop:
+
+```bash
+vouch bench run --seeds 1,2,3,4,5,6 \
+    --strategy contrib/strategies/mine.py \
+    --against contrib/strategies/baseline.py
+```
 
 ## why a second lane exists
 
