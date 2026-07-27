@@ -99,6 +99,16 @@ All notable changes to vouch are documented here. Format follows
   per-prompt block, the session banner, `vouch status` and the opt-in
   question all say so rather than calling it "this repo's" knowledge.
 
+### Fixed
+- `sync_vault` catches the `ProposalError` that `propose_page` raises for a
+  deleted citation (missing claim/entity/source id, with
+  `ArtifactNotFoundError` as cause), not just the raw
+  `ArtifactNotFoundError`. other proposal failures (empty title, page-kind
+  validation) surface as a neutral `vault edit rejected` `VaultSyncError`
+  rather than being mislabelled as an unknown artifact. the CLI's
+  `except VaultSyncError` renderer then prints a one-line `Error:` instead
+  of an uncaught traceback (#547).
+
 ## [1.5.0] — 2026-07-20
 
 ### Added

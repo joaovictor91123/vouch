@@ -248,6 +248,55 @@ def test_sync_vault_rejects_missing_vault(store: KBStore, tmp_path: Path) -> Non
         sync_vault(store, tmp_path / "does-not-exist")
 
 
+def test_sync_vault_surfaces_deleted_citation_as_vault_sync_error(
+    store: KBStore, vault: Path,
+) -> None:
+    """a vault edit to a page whose cited claim was since deleted must
+    surface as a clean VaultSyncError, not the raw ProposalError that
+    propose_page raises for an unknown id — otherwise it escapes the dead
+    `except ArtifactNotFoundError` handler as an uncaught traceback,
+    bypassing the CLI's VaultSyncError renderer. fixture cites `alpha-claim`."""
+    kb_to_vault(store, vault)
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+    # delete the cited claim so propose_page's id validation fails.
+    (store.kb_dir / "claims" / "alpha-claim.yaml").unlink()
+
+    with pytest.raises(VaultSyncError, match="unknown artifact"):
+        sync_vault(store, vault, direction="forward")
+
+
+def test_sync_vault_does_not_mislabel_non_artifact_proposal_errors(
+    store: KBStore, vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """other ProposalErrors from propose_page (e.g. empty title) must not
+    be reported as 'unknown artifact' — that wording is reserved for
+    missing claim/entity/source ids (#547 / CodeRabbit on #548). empty
+    titles are caught earlier by deserialise-and-skip, so drive the
+    non-artifact path by stubbing propose_page."""
+    from vouch.proposals import ProposalError
+
+    kb_to_vault(store, vault)
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+
+    def _reject(*_args: object, **_kwargs: object) -> None:
+        raise ProposalError("page title is empty")
+
+    monkeypatch.setattr("vouch.vault_sync.propose_page", _reject)
+
+    with pytest.raises(VaultSyncError, match="vault edit rejected") as ei:
+        sync_vault(store, vault, direction="forward")
+    assert "unknown artifact" not in str(ei.value)
+    assert "page title is empty" in str(ei.value)
+
+
 # --- CLI surface ----------------------------------------------------------
 
 
@@ -289,6 +338,31 @@ def test_cli_sync_missing_vault_is_clean_error(
     assert result.exit_code != 0
     assert "Traceback" not in result.output
     assert "Error:" in result.output
+
+
+def test_cli_sync_deleted_citation_is_clean_error(
+    store: KBStore, vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """deleted-citation must hit the CLI's VaultSyncError renderer as a
+    one-line Error:, not an uncaught ProposalError traceback (#547)."""
+    monkeypatch.chdir(store.root)
+    runner = CliRunner()
+    runner.invoke(cli, ["sync", "--vault", str(vault)])
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+    (store.kb_dir / "claims" / "alpha-claim.yaml").unlink()
+
+    result = runner.invoke(
+        cli, ["sync", "--vault", str(vault), "--direction", "forward"],
+    )
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "Error:" in result.output
+    assert "unknown artifact" in result.output
+    assert "unknown claim id" in result.output
 
 
 def test_cli_sync_requires_vault_flag(
