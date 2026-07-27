@@ -32,9 +32,15 @@ jobs:
       contents: write
       pull-requests: read
     steps:
+      # the push token: the ladder ruleset requires the gate check on every
+      # push, and the workflow GITHUB_TOKEN holds no bypass, so rows are
+      # pushed with an owner token (repo secret). safe because this workflow
+      # never runs on PR events and never executes untrusted code — the only
+      # inputs are gate-authored comments parsed as json.
       - uses: actions/checkout@v4
         with:
           ref: ${{ vars.KOTH_LADDER_BASE }}
+          token: ${{ secrets.KOTH_LEDGER_TOKEN || github.token }}
 
       - name: append rows for recently merged ladder prs
         env:
