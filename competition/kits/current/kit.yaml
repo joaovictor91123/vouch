@@ -12,7 +12,7 @@
 # seeds and your PR auto-merges. allowed keys and bounds are enforced by
 # .github/scripts/validate_kit.py - anything else fails before scoring.
 retrieval:
-  backend: auto
+  backend: substring
   default_limit: 10
   recency:
     enabled: true
