@@ -870,6 +870,16 @@ def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
 # --- personal-KB fallback capture through the hook CLI (phase 3) -----------
 
 
+def _turn_mode(store: KBStore) -> None:
+    """Pin the legacy per-turn answer path — these tests exercise the Stop-hook
+    CLI routing, which only files anything under capture.answer_mode: turn."""
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("capture", {})["answer_mode"] = "turn"
+    store.config_path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+
 @pytest.fixture()
 def _fallback_machine(tmp_path_factory, monkeypatch):
     """Fake home + registry + an opted-in personal KB; returns its store."""
@@ -885,6 +895,7 @@ def _fallback_machine(tmp_path_factory, monkeypatch):
     root = hub.personal_kb_root()
     assert root is not None
     personal = KBStore.init(root)
+    _turn_mode(personal)
     hub.register_kb(root, role="personal", actor="t")
     hub.set_personal_fallback(root, True)
     return personal
@@ -939,6 +950,7 @@ def test_answer_cli_project_kb_capture_has_no_origin(
     """A project-KB capture is NOT a fallback: no origin stamp, no tag."""
     proj = tmp_path / "realproj"
     store = KBStore.init(proj)
+    _turn_mode(store)
     monkeypatch.chdir(proj)
     transcript = _long_transcript(tmp_path)
     payload = _json.dumps({

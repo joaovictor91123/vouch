@@ -92,6 +92,9 @@ def _starter_config() -> dict[str, Any]:
             # auto-capture agent sessions into pending summaries.
             "enabled": True,
             "min_observations": 3,
+            # answer memory: "session" extracts claims once at SessionEnd from
+            # the full transcript; "turn" files claims on every Stop hook.
+            "answer_mode": "session",
             "split": {
                 # llm topical split for large sessions; llm_cmd falls back to
                 # compile.llm_cmd when null. see session_split.py.
@@ -428,8 +431,13 @@ class KBStore:
             schema_version_file.write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         gi = kb.kb_dir / ".gitignore"
         if not gi.exists():
-            # state.db is derived; proposed/ is the agent's scratch space.
-            gi.write_text("proposed/\ncaptures/\nstate.db\nstate.db-*\n", encoding="utf-8")
+            # state.db is derived; proposed/ is the agent's scratch space;
+            # retrieval_events is local telemetry (see retrieval_events.py).
+            gi.write_text(
+                "proposed/\ncaptures/\nretrieval_events.jsonl*\n"
+                "state.db\nstate.db-*\n",
+                encoding="utf-8",
+            )
         return kb
 
     # --- identity ----------------------------------------------------------

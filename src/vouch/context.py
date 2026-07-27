@@ -19,7 +19,7 @@ from typing import Any, Literal, cast
 
 import yaml
 
-from . import graph, hot_memory, index_db
+from . import graph, hot_memory, index_db, retrieval_events
 from .embeddings.fusion import rrf_fuse
 from .models import ClaimStatus, ContextItem, ContextPack, ContextQuality
 from .scoping import (
@@ -179,12 +179,79 @@ def _maybe_recency(
         if ts is None:
             rescored.append((kind, artifact_id, summary, score))
             continue
-        # Whole days only: sub-day age is noise at a 90-day half-life, and
-        # quantizing keeps repeat queries byte-identical within a day
-        # (fresh artifacts decay 1.0, so same-day scores never drift).
-        age_days = float(int(max((now - ts).total_seconds() / 86400.0, 0.0)))
+        # Whole days at half-lives of a day or more: sub-day age is noise at
+        # a 90-day half-life, and quantizing keeps repeat queries
+        # byte-identical within a day (fresh artifacts decay 1.0, so
+        # same-day scores never drift). A sub-day half-life is an explicit
+        # opt into session-scale recency, where truncation would silently
+        # turn the whole stage into a no-op — there, age stays fractional.
+        seconds = max((now - ts).total_seconds(), 0.0)
+        age_days = (
+            float(int(seconds / 86400.0))
+            if half_life_days >= 1.0
+            else seconds / 86400.0
+        )
         decay = 0.5 ** (age_days / half_life_days)
         rescored.append((kind, artifact_id, summary, score * (0.5 + 0.5 * decay)))
+    rescored.sort(key=lambda h: h[3], reverse=True)
+    return rescored
+
+
+_RAW_PAGE_TYPES = frozenset({"session", "log"})
+
+
+def _configured_pages_first(store: KBStore) -> tuple[bool, float]:
+    """Resolve the optional pages-first stage from config.yaml.
+
+    Compiled topic pages are consolidation done at write time — when one
+    answers the query it beats a pile of raw claims (the reader gets the
+    reviewed synthesis, citations attached). Off by default; opt in with
+    ``retrieval.pages_first.enabled: true``; ``boost`` multiplies page
+    scores (default 1.25, values <= 0 fall back).
+    """
+    try:
+        loaded = yaml.safe_load(store.config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False, 1.25
+    if not isinstance(loaded, dict):
+        return False, 1.25
+    retrieval = loaded.get("retrieval")
+    raw = retrieval.get("pages_first") if isinstance(retrieval, dict) else None
+    if not isinstance(raw, dict):
+        return False, 1.25
+    try:
+        boost = float(raw.get("boost", 1.25))
+    except (TypeError, ValueError):
+        boost = 1.25
+    if boost <= 0:
+        boost = 1.25
+    return bool(raw.get("enabled", False)), boost
+
+
+def _maybe_pages_first(
+    store: KBStore,
+    *,
+    hits: list[tuple[str, str, str, float]],
+) -> list[tuple[str, str, str, float]]:
+    """Boost compiled topic pages above raw claims when opted in.
+
+    Session/log pages are raw material, not synthesis (the same
+    ``_RAW_PAGE_TYPES`` line admission and compile draw) — they are never
+    boosted. Unreadable pages keep their score.
+    """
+    enabled, boost = _configured_pages_first(store)
+    if not enabled or not hits:
+        return hits
+    rescored: list[tuple[str, str, str, float]] = []
+    for kind, artifact_id, summary, score in hits:
+        if kind == "page":
+            try:
+                page = store.get_page(artifact_id)
+            except (ArtifactNotFoundError, OSError):
+                page = None
+            if page is not None and page.type not in _RAW_PAGE_TYPES:
+                score *= boost
+        rescored.append((kind, artifact_id, summary, score))
     rescored.sort(key=lambda h: h[3], reverse=True)
     return rescored
 
@@ -269,6 +336,7 @@ def _retrieve(
         if fused:
             filtered = filter_hits(store, fused, viewer, limit=limit)
             filtered = _maybe_recency(store, hits=filtered)
+            filtered = _maybe_pages_first(store, hits=filtered)
             filtered = _maybe_rerank(store, query=query, hits=filtered, limit=limit)
             return [(k, i, s, sc, "hybrid") for k, i, s, sc in filtered]
         # both retrievers empty -> fall through to the substring scan below.
@@ -277,6 +345,10 @@ def _retrieve(
         raw = index_db.search_semantic(store.kb_dir, query, limit=fetch_limit)
         if raw:
             filtered = filter_hits(store, raw, viewer, limit=limit)
+            # Parity with the hybrid path: an operator who opted into
+            # recency gets it regardless of which backend serves the query.
+            filtered = _maybe_recency(store, hits=filtered)
+            filtered = _maybe_pages_first(store, hits=filtered)
             return [(k, i, s, sc, "embedding") for k, i, s, sc in filtered]
         return []
 
@@ -285,6 +357,8 @@ def _retrieve(
             hits = index_db.search(store.kb_dir, query, limit=fetch_limit)
             if hits:
                 filtered = filter_hits(store, hits, viewer, limit=limit)
+                filtered = _maybe_recency(store, hits=filtered)
+                filtered = _maybe_pages_first(store, hits=filtered)
                 return [(k, i, s, sc, "fts5") for k, i, s, sc in filtered]
         except sqlite3.Error:
             pass
@@ -659,4 +733,10 @@ def build_context_pack(
             {"kind": k, "id": i, "score": sc, "backend": hits[0][4] if hits else "none"}
             for k, i, _sn, sc, _be in hits
         ]
+    # Telemetry, never load-bearing: the flywheel record of what was asked
+    # and what came back (see retrieval_events module docstring).
+    retrieval_events.log_event(
+        store, query=query, backend=str(result["backend"]), limit=limit,
+        budget_chars=max_chars, items=result["items"],
+    )
     return result

@@ -7,6 +7,16 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **session-mode answer memory** (`capture.answer_mode`, default `session`):
+  claims are extracted once at SessionEnd from the full transcript history
+  (`capture_session_answers`, wired into `capture finalize`) instead of on
+  every Stop hook. per-turn extraction saw one answer at a time, which is
+  where single-turn fragments like "… are noted at the end" came from; the
+  session document gives the extractor every turn at once, collapses
+  duplicate spans across turns, and spends one `max_claims` budget per
+  session rather than per turn. `capture.answer_mode: turn` restores the
+  legacy per-turn behaviour; the Stop hook stays wired either way (it defers
+  with `deferred-to-session-end` in session mode).
 - **an admission gate that filters knowledge-shaped garbage before it is
   filed** (`admission:` config). every ingestion path funnels through
   `proposals._file_proposal`, so a single provenance-keyed predicate there
