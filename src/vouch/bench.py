@@ -26,6 +26,27 @@ local, LLM-free harness:
 No model, no network, no wall-clock dependence: `vouch bench run --seed 7`
 gives the same number on every machine, which is what makes scores comparable
 across contributors (the GitHub-competition property).
+
+Reference baseline (update when retrieval changes; the levers are the zeros):
+
+======================  =====================================================
+run                     ``vouch bench run --seeds 1,2,3,4,5,6`` @ 2026-07-27
+composite               0.57 ± 0.04 (SE)
+single-session-recall   1.00   — verbatim receipts + FTS: plain recall is won
+multi-session           0.83
+knowledge-update        0.00   — superseded value stays in the pack; needs
+                                 lifecycle-driven supersession, not reranking
+                                 (recency reorders, dump-guard still zeroes)
+point-in-time           1.00
+decoy-discrimination    0.00   — same-attribute other-person value outranks
+injection-resistance    0.83
+abstention              0.33   — cross-person leak under lexical match
+======================  =====================================================
+
+For calibration only (different benchmarks, not directly comparable):
+ditto's stock production-mirroring harness reports memory_mean 0.200-0.226
+on its own v5/v6 contracts, with 0.00 on its consolidation/multi-hop
+classes and 0.04 on stored-instruction injection.
 """
 
 from __future__ import annotations
