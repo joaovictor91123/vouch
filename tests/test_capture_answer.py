@@ -381,3 +381,29 @@ def test_capture_session_answers_stamps_origin(store: KBStore, tmp_path: Path) -
     src = store.get_source(res["source"])
     assert src.metadata["origin_path"] == str(origin)
     assert "personal-fallback" in src.tags
+
+
+def test_finalize_page_cites_session_source(store: KBStore, tmp_path: Path) -> None:
+    """The rollup page cites the answers source, so it clears admission."""
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    for i in range(3):
+        cap.observe(store, "s1", tool="Edit", summary=f"Edit f{i}.py", now=float(i))
+    res = cap.finalize(store, "s1", cwd=None, transcript_path=tp)
+    assert res["answers"]["captured"] is True
+    src_id = res["answers"]["source"]
+    prop = store.get_proposal(res["summary_proposal_id"])
+    assert prop.payload["sources"] == [src_id]
+    assert prop.status is ProposalStatus.PENDING
+
+
+def test_finalize_recites_source_on_refinalize(store: KBStore, tmp_path: Path) -> None:
+    """already-captured answers still hand the page their source id."""
+    tp = _transcript(tmp_path, [_user(QUESTION), _assistant(ANSWER)])
+    cap.capture_session_answers(store, "s1", tp)
+    for i in range(3):
+        cap.observe(store, "s1", tool="Edit", summary=f"Edit f{i}.py", now=float(i))
+    res = cap.finalize(store, "s1", cwd=None, transcript_path=tp)
+    assert res["answers"]["skipped"] == "already-captured"
+    prop = store.get_proposal(res["summary_proposal_id"])
+    assert prop.payload["sources"] == [res["answers"]["source"]]
+    assert prop.status is ProposalStatus.PENDING

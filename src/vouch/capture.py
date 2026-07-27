@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from .enrich import Enrichment
 from .models import ProposalStatus
 from .secrets import mask_secrets
 from .storage import KBStore
@@ -465,6 +466,7 @@ def build_summary_body(
     project: str | None = None,
     generated_at: str | None = None,
     first_prompt: str | None = None,
+    enrichment: Enrichment | None = None,
 ) -> tuple[str, str]:
     tool_counts: dict[str, int] = {}
     files: set[str] = set(changed_files)
@@ -478,10 +480,13 @@ def build_summary_body(
         if cmd:
             commands.append(str(cmd))
     # The title is what a reviewer scans in the queue: lead with the human's
-    # own words when the transcript offers them, else with what changed.
+    # own words when the transcript offers them, then the enrichment summary
+    # (what the session accomplished), else with what changed.
     # The session uuid stays in the body for traceability.
     if first_prompt:
         title = f"session: {_excerpt(first_prompt)}"
+    elif enrichment is not None and enrichment.summary:
+        title = f"session: {_excerpt(enrichment.summary)}"
     else:
         title = _fallback_title(files, len(observations), generated_at)
     if project:
@@ -492,6 +497,14 @@ def build_summary_body(
     lines += [f"- session: `{session_id}`", f"- observations: {len(observations)}", ""]
     if first_prompt:
         lines += ["## prompt", "", f"> {first_prompt}", ""]
+    if enrichment is not None and enrichment.summary:
+        lines += ["## summary", "", enrichment.summary, ""]
+    if enrichment is not None and enrichment.subjects:
+        lines += ["## subjects", ""]
+        for s in enrichment.subjects:
+            desc = f": {s.description}" if s.description else ""
+            lines.append(f"- **{s.name}** ({s.type}){desc}")
+        lines.append("")
     if files:
         lines += ["## files modified this session", ""]
         lines += [f"- {f}" for f in sorted(files)[:20]]
@@ -548,17 +561,29 @@ def finalize(
     intent = (
         first_user_prompt(transcript_path) if transcript_path is not None else None
     )
-    result = session_split.summarize(
-        store, session_id, intent=intent, cwd=cwd, project=project,
-        generated_at=generated_at, mode=mode, config=cfg, origin=origin,
-    )
+    # Answers run FIRST so the summary page can cite the session source: an
+    # uncited session page is a diary the admission gate auto-rejects, while
+    # one citing the receipts-bearing source is reviewable knowledge. A
+    # claim-extraction failure still never loses the summary.
+    answers: dict[str, Any] | None = None
+    sources: list[str] = []
     if transcript_path is not None and cfg.answer_mode == "session":
         try:
-            result["answers"] = capture_session_answers(
+            answers = capture_session_answers(
                 store, session_id, transcript_path, config=cfg, origin=origin,
             )
         except Exception:
-            result["answers"] = _answer_skip(session_id, "error")
+            answers = _answer_skip(session_id, "error")
+        source_id = answers.get("source")
+        if source_id:
+            sources = [str(source_id)]
+    result = session_split.summarize(
+        store, session_id, intent=intent, cwd=cwd, project=project,
+        generated_at=generated_at, mode=mode, config=cfg, origin=origin,
+        sources=sources,
+    )
+    if answers is not None:
+        result["answers"] = answers
     return result
 
 
@@ -728,7 +753,11 @@ def capture_session_answers(
     sid = sha256_hex(content)
     try:
         store.get_source(sid)
-        return _answer_skip(session_id, "already-captured")
+        # The source id is returned even on skip: a re-finalize (e.g. crash
+        # between answers and summary) still lets the summary page cite it.
+        skip = _answer_skip(session_id, "already-captured")
+        skip["source"] = sid
+        return skip
     except ArtifactNotFoundError:
         pass
 

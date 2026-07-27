@@ -367,3 +367,89 @@ def test_kb_list_sessions_registered_and_returns_sessions(
     res = js.HANDLERS["kb.list_sessions"]({})
     assert "sessions" in res
     assert any(s["session_id"] == "sess-open" for s in res["sessions"])
+
+
+# --- enrichment + cited-page admission -------------------------------------
+
+ENRICH_JSON = (
+    '{"summary": "Fixed the audit-log write race.", "subjects": '
+    '[{"name": "Audit Log", "description": "the append-only log", '
+    '"type": "project"}]}'
+)
+
+
+def _enrich_stub(tmp_path: Path, output: str = ENRICH_JSON) -> str:
+    script = tmp_path / "enrich-llm.sh"
+    script.write_text(
+        f"#!/bin/sh\ncat > /dev/null\ncat <<'JSON'\n{output}\nJSON\n",
+        encoding="utf-8",
+    )
+    return f"sh {script}"
+
+
+def test_mechanical_page_enriched(store: KBStore, tmp_path: Path) -> None:
+    from vouch.models import ProposalStatus
+
+    store.config_path.write_text(
+        f'capture:\n  enrich:\n    llm_cmd: "{_enrich_stub(tmp_path)}"\n',
+        encoding="utf-8",
+    )
+    _observe(store, "s1", 5)
+    res = session_split.summarize(store, "s1")
+    assert res["mode"] == "mechanical"
+    assert res["enriched"] is True
+    prop = store.get_proposal(res["proposal_id"])
+    payload = prop.payload
+    # no intent -> the enrichment summary leads the title
+    assert payload["title"].startswith("session: Fixed the audit-log")
+    assert "audit-log" in payload["tags"]
+    assert "## summary" in payload["body"]
+    assert "## subjects" in payload["body"]
+    assert "**Audit Log** (project)" in payload["body"]
+    assert payload["metadata"]["enrich_summary"].startswith("Fixed the")
+    assert payload["metadata"]["subjects"] == [
+        {"name": "Audit Log", "description": "the append-only log", "type": "project"}
+    ]
+    # enrichment does NOT bypass admission: an uncited session page is still
+    # a diary — only a cited one clears the gate (see the test below).
+    assert prop.status is ProposalStatus.REJECTED
+
+
+def test_enrichment_failure_files_plain_page(store: KBStore, tmp_path: Path) -> None:
+    store.config_path.write_text(
+        'capture:\n  enrich:\n    llm_cmd: "false"\n', encoding="utf-8"
+    )
+    _observe(store, "s1", 5)
+    res = session_split.summarize(store, "s1")
+    assert res["mode"] == "mechanical"
+    assert res["enriched"] is False
+    payload = store.get_proposal(res["proposal_id"]).payload
+    assert "## subjects" not in payload["body"]
+
+
+def test_split_failure_fallback_skips_enrichment(store: KBStore, tmp_path: Path) -> None:
+    # split forced on and broken; a working enrich cmd must NOT be attempted
+    # on the fallback path (the LLM already failed once this run).
+    store.config_path.write_text(
+        "capture:\n"
+        '  split:\n    threshold_observations: 3\n    llm_cmd: "false"\n'
+        f'  enrich:\n    llm_cmd: "{_enrich_stub(tmp_path)}"\n',
+        encoding="utf-8",
+    )
+    _observe(store, "s1", 5)
+    res = session_split.summarize(store, "s1", mode="auto")
+    assert res["mode"] == "fallback"
+    assert res["enriched"] is False
+
+
+def test_cited_session_page_clears_admission(store: KBStore, tmp_path: Path) -> None:
+    from vouch.models import ProposalStatus
+
+    src = store.put_source(b"the session's answers", title="s1 answers",
+                           source_type="message")
+    _observe(store, "s1", 5)
+    res = session_split.summarize(store, "s1", sources=[src.id])
+    prop = store.get_proposal(res["proposal_id"])
+    assert prop.payload["sources"] == [src.id]
+    assert prop.status is ProposalStatus.PENDING
+    assert prop.decided_by is None
