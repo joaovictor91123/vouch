@@ -5383,5 +5383,82 @@ def openclaw_rpc() -> None:
     raise SystemExit(openclaw_rpc_mod.run_stdio())
 
 
+@cli.group()
+def bench() -> None:
+    """Seeded, judge-free memory benchmark over the real pipeline.
+
+    A dataset is a pure function of its seed; grading is substring checks
+    against a typed answer key with forbidden-value zeroing. Runs in a
+    throwaway KB — no existing .vouch/ is read or written.
+    """
+
+
+@bench.command("run")
+@click.option("--seed", default=1, show_default=True, type=int)
+@click.option(
+    "--seeds", default=None,
+    help="Comma-separated seed list; reports mean composite with a standard error.",
+)
+@click.option("--budget-chars", default=None, type=int, help="Context pack budget.")
+@click.option("--limit", default=None, type=int, help="Max context items per query.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the full report as JSON.")
+def bench_run(
+    seed: int, seeds: str | None, budget_chars: int | None,
+    limit: int | None, as_json: bool,
+) -> None:
+    """Score retrieval on a generated dataset.
+
+    \b
+    Examples:
+      vouch bench run --seed 7
+      vouch bench run --seeds 1,2,3,4,5 --json
+    """
+    from . import bench as bench_mod
+
+    budget = budget_chars if budget_chars is not None else bench_mod.DEFAULT_BUDGET_CHARS
+    top_k = limit if limit is not None else bench_mod.DEFAULT_LIMIT
+    if seeds:
+        seed_list = [int(s) for s in seeds.replace(" ", "").split(",") if s]
+        report = bench_mod.run_seeds(seed_list, budget_chars=budget, limit=top_k)
+        if as_json:
+            click.echo(json.dumps(report, indent=2))
+            return
+        click.echo(
+            f"seeds {seed_list}: composite "
+            f"{report['composite_mean']:.2f} ± {report['composite_se']:.2f} (SE)"
+        )
+        for name, mean in report["categories"].items():
+            click.echo(f"  {name:<24} {mean:>5.2f}")
+        return
+    report = bench_mod.run(seed, budget_chars=budget, limit=top_k)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(bench_mod.format_report(report))
+
+
+@bench.command("gen")
+@click.option("--seed", default=1, show_default=True, type=int)
+def bench_gen(seed: int) -> None:
+    """Print the generated dataset for a seed (sessions + answer key)."""
+    from . import bench as bench_mod
+
+    dataset = bench_mod.generate(seed)
+    payload = {
+        "seed": dataset.seed,
+        "sessions": [
+            {"title": t, "text": text} for t, text in dataset.sessions
+        ],
+        "cases": [
+            {
+                "category": c.category, "question": c.question,
+                "expected": c.expected, "forbidden": list(c.forbidden),
+            }
+            for c in dataset.cases
+        ],
+    }
+    click.echo(json.dumps(payload, indent=2))
+
+
 if __name__ == "__main__":
     cli()
