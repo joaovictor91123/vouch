@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from vouch import bench, health, lifecycle
@@ -188,3 +189,45 @@ def test_run_verifiability_stock_scores() -> None:
     assert report["categories"]["citation-correctness"]["mean"] == 1.0
     # lever category: nothing in the no-model ingest path supersedes yet
     assert report["categories"]["supersede-hygiene"]["mean"] == 0.0
+
+
+def test_paired_verdict_floor_gatekeeps_zero_se() -> None:
+    # identical per-seed diffs collapse the SE; the floor still gates
+    verdict = bench.paired_verdict([0.5, 0.5, 0.5], [0.505, 0.505, 0.505])
+    assert verdict["se"] == 0.0
+    assert verdict["band"] == bench.DETHRONE_FLOOR
+    assert not verdict["dethroned"]
+    clear = bench.paired_verdict([0.5, 0.5, 0.5], [0.51, 0.51, 0.51])
+    assert clear["dethroned"]
+
+
+def test_paired_verdict_requires_same_seed_count() -> None:
+    with pytest.raises(ValueError):
+        bench.paired_verdict([0.5, 0.5], [0.5])
+
+
+def test_run_seeds_threads_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def fake_run(seed: int, **kwargs: object) -> dict:
+        seen.append(kwargs.get("strategy"))
+        return {
+            "seed": seed,
+            "composite": 0.5,
+            "categories": {name: {"mean": 0.5} for name in CATEGORIES},
+        }
+
+    monkeypatch.setattr(bench, "run", fake_run)
+    sentinel = object()
+    bench.run_seeds([1, 2], strategy=sentinel)
+    assert seen == [sentinel, sentinel]
+
+
+def test_cli_bench_run_against_requires_strategy(tmp_path: Path) -> None:
+    champion = tmp_path / "champ.py"
+    champion.write_text("def rank(query, candidates, *, limit):\n    return []\n")
+    result = CliRunner().invoke(cli, ["bench", "run", "--against", str(champion)])
+    assert result.exit_code != 0
+    assert "--against requires --strategy" in result.output

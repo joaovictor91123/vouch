@@ -619,6 +619,7 @@ def run_seeds(
     sessions: int = DEFAULT_SESSIONS,
     extra_config: str | None = None,
     session_gap_seconds: float = 0.0,
+    strategy: Any = None,
 ) -> dict[str, Any]:
     """Run several seeds; report mean composite with a standard error.
 
@@ -630,6 +631,7 @@ def run_seeds(
         run(
             s, budget_chars=budget_chars, limit=limit, sessions=sessions,
             extra_config=extra_config, session_gap_seconds=session_gap_seconds,
+            strategy=strategy,
         )
         for s in seeds
     ]
@@ -655,6 +657,52 @@ def run_seeds(
         "composite_se": round(se, 4),
         "categories": category_means,
         "runs": reports,
+    }
+
+
+# The dethrone test from docs/vouchbench-seasons.md. FLOOR does the real
+# gatekeeping when a deterministic overfit collapses the SE to zero; Z is the
+# two-sided 95% normal quantile. Both CI scorers and the local --against loop
+# call paired_verdict, so the margin math cannot drift between them.
+DETHRONE_FLOOR = 0.007
+DETHRONE_Z = 1.96
+
+
+def paired_verdict(
+    champion_scores: list[float],
+    challenger_scores: list[float],
+    *,
+    floor: float = DETHRONE_FLOOR,
+    z: float = DETHRONE_Z,
+) -> dict[str, Any]:
+    """Apply the paired dethrone test to two same-seed score lists.
+
+    dethroned iff mean(challenger - champion) >= max(floor, z * SE) where SE
+    is the standard error of the per-seed paired differences (common random
+    numbers cancel seed-to-seed variance).
+    """
+    diffs = [
+        c - r for c, r in zip(challenger_scores, champion_scores, strict=True)
+    ]
+    mean_diff = statistics.mean(diffs)
+    se = (
+        statistics.stdev(diffs) / (len(diffs) ** 0.5)
+        if len(diffs) > 1 else 0.0
+    )
+    band = max(floor, z * se)
+    return {
+        "champion": {
+            "scores": champion_scores,
+            "mean": statistics.mean(champion_scores),
+        },
+        "challenger": {
+            "scores": challenger_scores,
+            "mean": statistics.mean(challenger_scores),
+        },
+        "mean_diff": mean_diff,
+        "se": se,
+        "band": band,
+        "dethroned": mean_diff >= band,
     }
 
 

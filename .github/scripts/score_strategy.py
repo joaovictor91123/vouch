@@ -17,15 +17,14 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import statistics
 from pathlib import Path
 
 from vouch import bench
 from vouch.strategy import SandboxProxy
 
 N_SEEDS = 8
-FLOOR = 0.007
-Z = 1.96
+FLOOR = bench.DETHRONE_FLOOR
+Z = bench.DETHRONE_Z
 SESSION_GAP_SECONDS = 2.0
 
 
@@ -61,37 +60,22 @@ def main() -> int:
 
     champion_scores = score(args.champion, seeds)
     challenger_scores = score(args.challenger, seeds)
-    diffs = [
-        c - r for c, r in zip(challenger_scores, champion_scores, strict=True)
-    ]
-    mean_diff = statistics.mean(diffs)
-    se = statistics.stdev(diffs) / (len(diffs) ** 0.5) if len(diffs) > 1 else 0.0
-    band = max(FLOOR, Z * se)
-    dethroned = mean_diff >= band
+    verdict = bench.paired_verdict(
+        champion_scores, challenger_scores, floor=FLOOR, z=Z,
+    )
 
     report = {
         "date": date,
         "base_sha": args.base_sha,
         "seeds": seeds,
         "lane": "engine",
-        "champion": {
-            "scores": champion_scores,
-            "mean": statistics.mean(champion_scores),
-        },
-        "challenger": {
-            "scores": challenger_scores,
-            "mean": statistics.mean(challenger_scores),
-        },
-        "mean_diff": mean_diff,
-        "se": se,
-        "band": band,
-        "dethroned": dethroned,
+        **verdict,
     }
     text = json.dumps(report, indent=1)
     print(text)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
-    return 0 if dethroned else 3
+    return 0 if report["dethroned"] else 3
 
 
 if __name__ == "__main__":
