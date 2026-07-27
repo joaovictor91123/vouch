@@ -519,7 +519,6 @@ def run(
     workdir: Path | None = None,
     extra_config: str | None = None,
     session_gap_seconds: float = 0.0,
-    strategy: Any = None,
 ) -> dict[str, Any]:
     """Generate, ingest through the real pipeline, retrieve, and grade.
 
@@ -536,11 +535,6 @@ def run(
     timestamps carry the sessions' temporal order — the structure a
     recency-aware arm ranks by. Zero (the default) keeps runs fast; the
     generated dataset is identical either way.
-
-    ``strategy`` is an optional pluggable ranking strategy (see
-    ``vouch.strategy``) — the engine-lane arm. For a competition submission
-    it is a ``SandboxProxy`` wrapping the untrusted file; the same generated
-    dataset scored with vs without it isolates the strategy's contribution.
     """
     import tempfile
     import time as time_mod
@@ -570,7 +564,6 @@ def run(
         for case in dataset.cases:
             pack = build_context_pack(
                 store, query=case.question, limit=limit, max_chars=budget_chars,
-                strategy=strategy,
             )
             pack_dict = dict(pack)
             if case.category == "citation-correctness":
