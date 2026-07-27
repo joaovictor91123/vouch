@@ -179,10 +179,18 @@ def _maybe_recency(
         if ts is None:
             rescored.append((kind, artifact_id, summary, score))
             continue
-        # Whole days only: sub-day age is noise at a 90-day half-life, and
-        # quantizing keeps repeat queries byte-identical within a day
-        # (fresh artifacts decay 1.0, so same-day scores never drift).
-        age_days = float(int(max((now - ts).total_seconds() / 86400.0, 0.0)))
+        # Whole days at half-lives of a day or more: sub-day age is noise at
+        # a 90-day half-life, and quantizing keeps repeat queries
+        # byte-identical within a day (fresh artifacts decay 1.0, so
+        # same-day scores never drift). A sub-day half-life is an explicit
+        # opt into session-scale recency, where truncation would silently
+        # turn the whole stage into a no-op — there, age stays fractional.
+        seconds = max((now - ts).total_seconds(), 0.0)
+        age_days = (
+            float(int(seconds / 86400.0))
+            if half_life_days >= 1.0
+            else seconds / 86400.0
+        )
         decay = 0.5 ** (age_days / half_life_days)
         rescored.append((kind, artifact_id, summary, score * (0.5 + 0.5 * decay)))
     rescored.sort(key=lambda h: h[3], reverse=True)
@@ -277,6 +285,9 @@ def _retrieve(
         raw = index_db.search_semantic(store.kb_dir, query, limit=fetch_limit)
         if raw:
             filtered = filter_hits(store, raw, viewer, limit=limit)
+            # Parity with the hybrid path: an operator who opted into
+            # recency gets it regardless of which backend serves the query.
+            filtered = _maybe_recency(store, hits=filtered)
             return [(k, i, s, sc, "embedding") for k, i, s, sc in filtered]
         return []
 
@@ -285,6 +296,7 @@ def _retrieve(
             hits = index_db.search(store.kb_dir, query, limit=fetch_limit)
             if hits:
                 filtered = filter_hits(store, hits, viewer, limit=limit)
+                filtered = _maybe_recency(store, hits=filtered)
                 return [(k, i, s, sc, "fts5") for k, i, s, sc in filtered]
         except sqlite3.Error:
             pass

@@ -328,6 +328,8 @@ def run(
     limit: int = DEFAULT_LIMIT,
     sessions: int = DEFAULT_SESSIONS,
     workdir: Path | None = None,
+    extra_config: str | None = None,
+    session_gap_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Generate, ingest through the real pipeline, retrieve, and grade.
 
@@ -335,8 +337,18 @@ def run(
     created when omitted. The KB opts into the receipt gate so extracted
     claims become durable without a human — the same opt-in a solo deployment
     uses — and every retrieval runs under ``budget_chars``.
+
+    ``extra_config`` is appended verbatim to the bench KB's config.yaml —
+    the arm mechanism: the same dataset scored under a different retrieval
+    configuration is an A/B with one moving part.
+
+    ``session_gap_seconds`` sleeps between session ingests so claim
+    timestamps carry the sessions' temporal order — the structure a
+    recency-aware arm ranks by. Zero (the default) keeps runs fast; the
+    generated dataset is identical either way.
     """
     import tempfile
+    import time as time_mod
 
     from . import health
     from .context import build_context_pack
@@ -346,10 +358,13 @@ def run(
     with tempfile.TemporaryDirectory(prefix="vouch-bench-") as tmp:
         root = workdir or Path(tmp)
         store = KBStore.init(root / "kb")
-        store.config_path.write_text(
-            "review:\n  auto_approve_on_receipt: true\n", encoding="utf-8"
-        )
-        for title, text in dataset.sessions:
+        config_text = "review:\n  auto_approve_on_receipt: true\n"
+        if extra_config:
+            config_text += extra_config.rstrip() + "\n"
+        store.config_path.write_text(config_text, encoding="utf-8")
+        for i, (title, text) in enumerate(dataset.sessions):
+            if i and session_gap_seconds > 0:
+                time_mod.sleep(session_gap_seconds)
             ingest_source(
                 store, text.encode("utf-8"), proposed_by=BENCH_ACTOR, title=title,
             )
@@ -398,6 +413,8 @@ def run_seeds(
     budget_chars: int = DEFAULT_BUDGET_CHARS,
     limit: int = DEFAULT_LIMIT,
     sessions: int = DEFAULT_SESSIONS,
+    extra_config: str | None = None,
+    session_gap_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Run several seeds; report mean composite with a standard error.
 
@@ -406,7 +423,10 @@ def run_seeds(
     a comparison-grade number.
     """
     reports = [
-        run(s, budget_chars=budget_chars, limit=limit, sessions=sessions)
+        run(
+            s, budget_chars=budget_chars, limit=limit, sessions=sessions,
+            extra_config=extra_config, session_gap_seconds=session_gap_seconds,
+        )
         for s in seeds
     ]
     composites = [r["composite"] for r in reports]
