@@ -20,6 +20,7 @@ from typing import Any, Literal, cast
 import yaml
 
 from . import graph, hot_memory, index_db, retrieval_events
+from . import strategy as strategy_mod
 from .embeddings.fusion import rrf_fuse
 from .models import ClaimStatus, ContextItem, ContextPack, ContextQuality
 from .scoping import (
@@ -306,6 +307,71 @@ def _maybe_rerank(
             ordered.append(hit)
             seen.add(key)
     return ordered + hits[window_size:]
+
+
+def _configured_strategy(store: KBStore) -> str | None:
+    """Resolve ``retrieval.strategy`` - a dotted import path to a shipped,
+    human-merged strategy - from config.yaml. Off (None) by default."""
+    try:
+        loaded = yaml.safe_load(store.config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    retrieval = loaded.get("retrieval")
+    if not isinstance(retrieval, dict):
+        return None
+    dotted = retrieval.get("strategy")
+    return dotted if isinstance(dotted, str) and dotted else None
+
+
+def _maybe_strategy(
+    store: KBStore,
+    *,
+    query: str,
+    hits: list[tuple[str, str, str, float, str]],
+    limit: int,
+    strategy: strategy_mod.RetrievalStrategy | None = None,
+) -> list[tuple[str, str, str, float, str]]:
+    """Apply a pluggable ranking strategy as the final reorder stage.
+
+    ``strategy`` is passed explicitly by the benchmark (an untrusted
+    submission, wrapped in a sandbox proxy); otherwise a shipped strategy is
+    resolved from ``retrieval.strategy`` config and loaded in-process. With
+    neither, hits pass through byte-identical. A strategy that raises or
+    returns nothing usable leaves the order untouched - retrieval never fails
+    because a ranking plugin misbehaved.
+    """
+    strat = strategy
+    if strat is None:
+        dotted = _configured_strategy(store)
+        if not dotted:
+            return hits
+        try:
+            strat = strategy_mod.load_dotted(dotted)
+        except Exception:
+            return hits
+    if not hits:
+        return hits
+    # the strategy addresses hits by id; if two hits somehow share one (a
+    # cross-kind slug collision), a reorder-by-id would be ambiguous, so skip
+    # the stage rather than risk attaching an order to the wrong artifact.
+    ids = [h[1] for h in hits]
+    if len(set(ids)) != len(ids):
+        return hits
+    candidates = [
+        strategy_mod.Candidate(kind=k, id=i, summary=s, score=sc)
+        for k, i, s, sc, _b in hits
+    ]
+    try:
+        ordered_ids = strat.rank(query, candidates, limit=limit)
+    except Exception:
+        return hits
+    by_id = {h[1]: h for h in hits}
+    reordered = strategy_mod.apply_ordering(
+        list(ordered_ids), [(k, i, s, sc) for k, i, s, sc, _b in hits]
+    )
+    return [by_id[h4[1]] for h4 in reordered]
 
 
 def _retrieve(
@@ -602,6 +668,7 @@ def build_context_pack(
     graph_depth: int = 1,
     graph_limit: int = 20,
     graph_rel_types: list[str] | None = None,
+    strategy: strategy_mod.RetrievalStrategy | None = None,
 ) -> ContextPack | dict[str, Any]:
     viewer = viewer_from(
         config_path=store.config_path,
@@ -609,6 +676,9 @@ def build_context_pack(
         agent=agent,
     )
     hits = _retrieve(store, query, limit, viewer)
+    hits = _maybe_strategy(
+        store, query=query, hits=hits, limit=limit, strategy=strategy
+    )
     items: list[ContextItem] = []
     for kind, hid, summary, score, backend in hits:
         cites: list[str] = []
