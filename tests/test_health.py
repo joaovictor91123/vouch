@@ -404,3 +404,27 @@ def test_fsck_without_state_db_reports_info(store: KBStore) -> None:
     assert "index_missing" in codes
     # info finding alone shouldn't fail the report.
     assert report.ok is True
+
+
+def test_receipt_coverage_fidelity_number(store: KBStore) -> None:
+    from vouch.extract import ingest_source
+    from vouch.models import Claim
+
+    assert health.receipt_coverage(store) == {
+        "live_claims": 0, "receipted": 0, "ratio": None,
+    }
+    # a receipt-backed claim (cites an Evidence record)
+    ingest_source(
+        store,
+        b"The deploy window opens every wednesday at nine in the morning.",
+        proposed_by="test",
+    )
+    cov = health.receipt_coverage(store)
+    assert cov["live_claims"] == cov["receipted"] == 1
+    assert cov["ratio"] == 1.0
+    # a plain claim citing only a source — no receipt
+    src = store.put_source(b"unquoted background material")
+    store.put_claim(Claim(id="plain", text="a plain claim", evidence=[src.id]))
+    cov = health.receipt_coverage(store)
+    assert cov == {"live_claims": 2, "receipted": 1, "ratio": 0.5}
+    assert health.status(store)["receipt_coverage"] == cov
