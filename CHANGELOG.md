@@ -6,6 +6,15 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **bench grading saw highlight markup**: retrieval wraps query-matched
+  terms in guillemets, which broke the bench's substring checks exactly
+  on query-relevant claims — expected values read as missing (deflating
+  recall categories) and highlighted forbidden values slipped past the
+  zeroing (inflating dump-guard categories). grading now strips the
+  markers; absolute bench scores shift, paired comparisons were fair
+  either way. the reference baseline table is refreshed.
+
 ### Added
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
