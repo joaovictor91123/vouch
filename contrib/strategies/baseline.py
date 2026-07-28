@@ -1,9 +1,11 @@
-"""The reigning engine-lane champion: trust the backend's fused order.
+"""The reigning engine-lane champion: provenance-aware ranking.
 
-This is the strategy every submission must beat. It returns the candidates in
-exactly the order retrieval handed them over - i.e. it does nothing - so a
-challenger only dethrones it by making vouch's benchmark score genuinely
-higher, not by accident.
+Promoted from a contrib submission (PR #567, +0.05 composite over the
+identity baseline). The logic ships in the package as
+``vouch.strategies.provenance``; this file re-exports it so the gate's
+``--champion contrib/strategies/baseline.py`` keeps pointing at whatever
+currently reigns. Dethrone it by opening a PR that adds one new file
+under ``contrib/strategies/`` and clears the margin band.
 
 A strategy is real ranking code. It receives the query and an over-fetched
 candidate pool (data only - no KB, no disk, no network) and returns the ids in
@@ -14,8 +16,6 @@ de-prioritise a candidate out of the pack, but never fabricate a result or
 shrink the pack.
 """
 
-from vouch.strategy import Candidate
+from vouch.strategies.provenance import rank
 
-
-def rank(query: str, candidates: list[Candidate], *, limit: int) -> list[str]:
-    return [c.id for c in candidates]
+__all__ = ["rank"]
