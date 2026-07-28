@@ -75,7 +75,10 @@ stops code that overfits the benchmark — lookup tables, category-pattern
 dispatch, generator-template matching are the disqualifiers
 (`docs/vouchbench-seasons.md`). review is a veto for cheating, never a
 taste test. a clean win merges, ships in the next release, and is
-credited in the changelog.
+credited in the changelog. on merge, the ledger sweep promotes the
+winner to reigning champion automatically — the merge threshold ratchets
+up with every merged win, because the next challenger is scored against
+you.
 
 ## warming up: the kit lane
 
