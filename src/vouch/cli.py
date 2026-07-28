@@ -29,6 +29,7 @@ from . import __version__, bundle, health, hub_client, volunteer_context
 from . import adopt as adopt_mod
 from . import audit as audit_mod
 from . import capture as capture_mod
+from . import chatgpt_import as chatgpt_import_mod
 from . import codex_rollout as codex_rollout_mod
 from . import compile as compile_mod
 from . import digest as digest_mod
@@ -111,6 +112,7 @@ def _cli_errors() -> Iterator[None]:
         ProposalError,
         LifecycleError,
         migrations_mod.MigrationError,
+        chatgpt_import_mod.ChatGPTImportError,
         codex_rollout_mod.CodexRolloutError,
     ) as e:
         raise click.ClickException(str(e)) from e
@@ -4088,6 +4090,52 @@ def import_proposals_cmd(bundle_path: str, origin_kb: str | None) -> None:
     except RuntimeError as e:
         raise click.ClickException(str(e)) from e
     _emit_json(r)
+
+
+@cli.command("import-chatgpt")
+@click.argument(
+    "export_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--limit", type=int, default=None,
+    help="Import at most N conversations, in export order.",
+)
+@click.option("--dry-run", is_flag=True, help="Parse and report; file nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
+def import_chatgpt_cmd(
+    export_path: Path, limit: int | None, dry_run: bool, as_json: bool
+) -> None:
+    """Import a ChatGPT history export as PENDING session-page proposals.
+
+    Takes the data-export ZIP OpenAI mails out (or its conversations.json)
+    and files one review-gated session page per conversation -- every user
+    turn paired with the assistant turn that answered it, cited to a
+    per-conversation source. Re-importing is idempotent: unchanged
+    conversations are no-ops, grown ones refresh their PENDING proposal in
+    place, decided ones stay decided. Review with `vouch review`.
+    """
+    store = _load_store()
+    with _cli_errors():
+        report = chatgpt_import_mod.import_export(
+            store, export_path, limit=limit, dry_run=dry_run,
+            generated_at=datetime.now(UTC).isoformat(),
+        )
+    if as_json:
+        _emit_json(report)
+        return
+    verb = "would import" if dry_run else "imported"
+    _echo(
+        f"{report['conversations']} conversation(s) — {verb} "
+        f"{report['imported']} new, {report['updated']} updated, "
+        f"{report['skipped']} skipped"
+    )
+    for row in report["rows"]:
+        if row["action"] == "skipped":
+            continue
+        pid = row.get("proposal_id") or "(dry-run)"
+        _echo(f"  • {pid}  {row['title']}")
+    if not dry_run and (report["imported"] or report["updated"]):
+        _echo("run `vouch review` to decide.")
 
 
 # --- auto-pr: open N mergeable PRs against any github repo -----------------
