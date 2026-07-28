@@ -44,9 +44,12 @@ def rank(query: str, candidates: list[Candidate], *, limit: int) -> list[str]:
 a `Candidate` is `kind`, `id`, `summary`, `score` - **data only**. the
 strategy never receives the KB, the filesystem, or a socket. ordering is
 authoritative but bounded (ids you invent are ignored; candidates you omit are
-appended), so a strategy can reorder and de-prioritise but cannot fabricate or
-hide a result. see `contrib/strategies/baseline.py` (the champion) and
-`example_lexical.py` (a worked example).
+appended). with a strategy active, retrieval over-fetches a bounded candidate
+pool and the top `limit` of your order survive the cut - so de-prioritising a
+candidate below the window genuinely excludes it from the pack. a strategy
+still cannot fabricate a result or shrink the pack. see
+`contrib/strategies/baseline.py` (the champion) and `example_lexical.py` (a
+worked example).
 
 ## how a submission is scored
 

@@ -200,3 +200,40 @@ def test_shipped_examples_load(path: str) -> None:
     assert hasattr(strat, "rank")
     result = strat.rank("beta gamma", CANDS, limit=10)
     assert sorted(result) == ["a", "b", "c"]
+
+
+def test_strategy_demotion_excludes_from_pack(tmp_path: Path) -> None:
+    # with a strategy active, retrieval over-fetches a pool and the top
+    # ``limit`` of the strategy's order survive - de-prioritising below the
+    # window must EXCLUDE the candidate, not just reorder it.
+    from vouch import health
+    from vouch.context import build_context_pack
+    from vouch.models import Claim
+    from vouch.storage import KBStore
+
+    store = KBStore.init(tmp_path / "kb")
+    src = store.put_source(b"raw")
+    for i in range(4):
+        store.put_claim(Claim(
+            id=f"kite-{i}", text=f"kite fact number {i}", evidence=[src.id],
+        ))
+    store.put_claim(Claim(
+        id="kite-noisy", text="kite fact but noisy hearsay", evidence=[src.id],
+    ))
+    health.rebuild_index(store)
+
+    class DemoteNoisy:
+        def rank(self, query, candidates, *, limit):
+            keep = [c.id for c in candidates if "noisy" not in c.summary]
+            tail = [c.id for c in candidates if "noisy" in c.summary]
+            return keep + tail
+
+    pack = dict(build_context_pack(
+        store, query="kite fact", limit=4, strategy=DemoteNoisy(),
+    ))
+    ids = [item["id"] for item in pack["items"]]
+    assert len(ids) == 4
+    assert "kite-noisy" not in ids
+
+    baseline = dict(build_context_pack(store, query="kite fact", limit=4))
+    assert len(baseline["items"]) == 4

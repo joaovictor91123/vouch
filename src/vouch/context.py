@@ -45,6 +45,12 @@ _RETRACTED_CLAIM_STATUSES = frozenset({
 
 ContextItemKind = Literal["claim", "page", "entity", "relation", "source"]
 
+# Candidate-pool sizing when a ranking strategy is active: the strategy
+# ranks pool candidates and the top ``limit`` survive, so exclusion (not
+# just order) is in its hands. Factor/floor keep the pool a shortlist.
+_STRATEGY_POOL_FACTOR = 5
+_STRATEGY_POOL_MIN = 50
+
 _VALID_BACKENDS = ("auto", "hybrid", "embedding", "fts5", "substring")
 _RERANKER_CACHE: Any | None = None
 
@@ -675,10 +681,17 @@ def build_context_pack(
         project=project,
         agent=agent,
     )
-    hits = _retrieve(store, query, limit, viewer)
+    # with a ranking strategy active, retrieval over-fetches a bounded pool
+    # and the strategy's order decides which ``limit`` survive the cut —
+    # de-prioritising a candidate below the window excludes it from the
+    # pack. without one, the pool IS the limit and nothing changes. the
+    # pool is bounded so a strategy ranks a shortlist, never the whole kb.
+    strategy_active = strategy is not None or _configured_strategy(store)
+    pool = max(limit * _STRATEGY_POOL_FACTOR, _STRATEGY_POOL_MIN) if strategy_active else limit
+    hits = _retrieve(store, query, pool, viewer)
     hits = _maybe_strategy(
         store, query=query, hits=hits, limit=limit, strategy=strategy
-    )
+    )[:limit]
     items: list[ContextItem] = []
     for kind, hid, summary, score, backend in hits:
         cites: list[str] = []
