@@ -5401,10 +5401,21 @@ def bench() -> None:
 )
 @click.option("--budget-chars", default=None, type=int, help="Context pack budget.")
 @click.option("--limit", default=None, type=int, help="Max context items per query.")
+@click.option(
+    "--strategy", "strategy_path", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Score with this ranking strategy file, sandboxed exactly like CI.",
+)
+@click.option(
+    "--against", "against_path", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Champion strategy file to pair against; prints the dethrone verdict.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the full report as JSON.")
 def bench_run(
     seed: int, seeds: str | None, budget_chars: int | None,
-    limit: int | None, as_json: bool,
+    limit: int | None, strategy_path: str | None, against_path: str | None,
+    as_json: bool,
 ) -> None:
     """Score retrieval on a generated dataset.
 
@@ -5412,14 +5423,54 @@ def bench_run(
     Examples:
       vouch bench run --seed 7
       vouch bench run --seeds 1,2,3,4,5 --json
+      vouch bench run --seeds 1,2,3 --strategy contrib/strategies/mine.py \\
+          --against contrib/strategies/baseline.py
     """
     from . import bench as bench_mod
 
     budget = budget_chars if budget_chars is not None else bench_mod.DEFAULT_BUDGET_CHARS
     top_k = limit if limit is not None else bench_mod.DEFAULT_LIMIT
+    if against_path and not strategy_path:
+        raise click.UsageError("--against requires --strategy")
+    strategy = None
+    if strategy_path:
+        from .strategy import SandboxProxy
+
+        strategy = SandboxProxy(strategy_path)
+    seed_list = (
+        [int(s) for s in seeds.replace(" ", "").split(",") if s]
+        if seeds else [seed]
+    )
+    if against_path:
+        champion = SandboxProxy(against_path)
+        champion_scores = [
+            bench_mod.run(
+                s, budget_chars=budget, limit=top_k, strategy=champion,
+            )["composite"]
+            for s in seed_list
+        ]
+        challenger_scores = [
+            bench_mod.run(
+                s, budget_chars=budget, limit=top_k, strategy=strategy,
+            )["composite"]
+            for s in seed_list
+        ]
+        verdict = bench_mod.paired_verdict(champion_scores, challenger_scores)
+        verdict["seeds"] = seed_list
+        if as_json:
+            click.echo(json.dumps(verdict, indent=2))
+            return
+        click.echo(
+            f"challenger {verdict['challenger']['mean']:.4f}  "
+            f"champion {verdict['champion']['mean']:.4f}  "
+            f"diff {verdict['mean_diff']:+.4f}  band {verdict['band']:.4f}"
+        )
+        click.echo("DETHRONED" if verdict["dethroned"] else "held")
+        return
     if seeds:
-        seed_list = [int(s) for s in seeds.replace(" ", "").split(",") if s]
-        report = bench_mod.run_seeds(seed_list, budget_chars=budget, limit=top_k)
+        report = bench_mod.run_seeds(
+            seed_list, budget_chars=budget, limit=top_k, strategy=strategy,
+        )
         if as_json:
             click.echo(json.dumps(report, indent=2))
             return
@@ -5430,7 +5481,7 @@ def bench_run(
         for name, mean in report["categories"].items():
             click.echo(f"  {name:<24} {mean:>5.2f}")
         return
-    report = bench_mod.run(seed, budget_chars=budget, limit=top_k)
+    report = bench_mod.run(seed, budget_chars=budget, limit=top_k, strategy=strategy)
     if as_json:
         click.echo(json.dumps(report, indent=2))
         return
