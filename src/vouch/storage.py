@@ -133,6 +133,11 @@ def _starter_config() -> dict[str, Any]:
             "prompt_gate": {
                 "enabled": True,
             },
+            # the reigning engine-lane champion, applied as the final
+            # reorder stage of every context pack (see vouch.strategies).
+            # new KBs get it on; existing KBs keep byte-identical ordering
+            # until they add this key. set to null to opt out.
+            "strategy": "vouch.strategies.provenance",
         },
         "agents": {
             "recommended_loop": [

@@ -7,6 +7,17 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **shipped ranking champion** (`vouch.strategies.provenance`): the
+  engine-lane winner (provenance-aware ranking — hearsay and stored
+  instructions demoted, change-of-state phrasing boosted) now ships in
+  the package. new KBs get it via the starter config
+  (`retrieval.strategy`); existing KBs keep byte-identical ordering until
+  they add the key, and `strategy: null` opts out. the competition
+  champion `contrib/strategies/baseline.py` delegates to it, so
+  challengers now have to beat real ranking, not identity order. with a
+  strategy active, retrieval over-fetches a bounded candidate pool and
+  the strategy's top-`limit` survive — de-prioritising below the window
+  genuinely excludes a candidate from the pack.
 - **session-mode answer memory** (`capture.answer_mode`, default `session`):
   claims are extracted once at SessionEnd from the full transcript history
   (`capture_session_answers`, wired into `capture finalize`) instead of on
