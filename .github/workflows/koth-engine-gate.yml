@@ -19,7 +19,7 @@
 name: koth-engine-gate
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] workflow + grader + champion all come from the base branch; the PR's .py runs only inside the sandbox child, and the job token is read-only with no secrets
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:

@@ -17,7 +17,7 @@
 name: koth-gate
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no PR code ever executes: the kit is fetched as data, validated against a closed-world allowlist, and scored by base-branch code with a read-only checkout
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
@@ -138,6 +138,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           LADDER_BASE: ${{ vars.KOTH_LADDER_BASE }}
         run: |
+          # shellcheck disable=SC2016 # the posted markdown carries literal backticks
           if [ "$BASE_REF" = "$LADDER_BASE" ] && [ -n "$LADDER_BASE" ]; then
             gate_note="auto-merge on dethrone (provisional ladder branch)"
           else
