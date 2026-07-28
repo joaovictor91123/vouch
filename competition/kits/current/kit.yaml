@@ -9,9 +9,8 @@
 # values reproduce the repo baseline exactly.
 #
 # dethrone these values by max(0.007, 1.96 * paired SE) over the day's
-# seeds and your PR auto-merges on the ladder branch. allowed keys and
-# bounds are enforced by .github/scripts/validate_kit.py - anything else
-# fails before scoring.
+# seeds and your PR auto-merges. allowed keys and bounds are enforced by
+# .github/scripts/validate_kit.py - anything else fails before scoring.
 retrieval:
   backend: auto
   default_limit: 10

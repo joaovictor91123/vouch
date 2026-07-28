@@ -37,7 +37,12 @@ jobs:
     steps:
       - name: checkout base branch (trusted code only)
         uses: actions/checkout@v4
-        # no ref: pull_request_target checks out the base branch tip
+        # pull_request_target defaults to the DEFAULT branch, not the PR
+        # base - pin the base ref explicitly. still trusted code: a branch
+        # of this repo, never the PR head. the base carries the scripts,
+        # the engine, and the reigning kit.
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: classify the PR
         id: classify
@@ -103,10 +108,12 @@ jobs:
       - name: paired scoring - challenger vs reigning kit
         if: steps.classify.outputs.mode == 'ladder'
         id: score
-        env:
-          BASE_SHA: ${{ github.sha }}
         run: |
           set +e
+          # seed identity = the tree actually scored (the checked-out base
+          # tip), not github.sha, which is the default branch under
+          # pull_request_target
+          BASE_SHA="$(git rev-parse HEAD)"
           python .github/scripts/koth_score.py \
             --champion competition/kits/current/kit.yaml \
             --challenger /tmp/kit-challenger.yaml \
