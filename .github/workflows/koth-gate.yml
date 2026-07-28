@@ -17,7 +17,7 @@
 name: koth-gate
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no PR code ever executes: the kit is fetched as data, validated against a closed-world allowlist, and scored by base-branch code with a read-only checkout
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
@@ -143,6 +143,8 @@ jobs:
           else
             gate_note="scored only - auto-merge is disabled for base '${BASE_REF}'; a maintainer promotes proven champions to shipped defaults by hand"
           fi
+          # the posted markdown carries literal backticks
+          # shellcheck disable=SC2016
           {
             echo "koth ladder - ${VERDICT}"
             echo
