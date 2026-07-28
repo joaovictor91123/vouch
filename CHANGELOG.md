@@ -6,6 +6,18 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **auto approval is the default** (`review.approver_role: trusted-agent`
+  in the starter config): a fresh KB approves the capturing agent's
+  proposals with no human step. nothing bypasses the gate — every write
+  still flows through `proposals.approve()` with one audit event and the
+  `auto_approved` stamp; the new `proposals.auto_approve_pending` drain
+  (run from capture finalize) clears claims, pages, entities and
+  relations, rejects duplicates, and still holds protected page kinds,
+  dead-reference pages, id conflicts and delete proposals for a
+  reviewer. remove `approver_role` from `config.yaml` to put writes back
+  behind `vouch review`.
+
 ### Added
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
