@@ -39,6 +39,11 @@ jobs:
     steps:
       - name: checkout base branch (trusted code only)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        # pull_request_target defaults to the DEFAULT branch, not the PR
+        # base - pin the base ref explicitly (same fix the kit gate got).
+        # still trusted code: a branch of this repo, never the PR head.
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: classify the PR
         id: classify
@@ -104,10 +109,12 @@ jobs:
       - name: paired scoring - challenger vs baseline champion (sandboxed)
         if: steps.classify.outputs.mode == 'engine'
         id: score
-        env:
-          BASE_SHA: ${{ github.sha }}
         run: |
           set +e
+          # seed identity = the tree actually scored (the checked-out base
+          # tip), not github.sha, which is the default branch under
+          # pull_request_target
+          BASE_SHA="$(git rev-parse HEAD)"
           python .github/scripts/score_strategy.py \
             --champion contrib/strategies/baseline.py \
             --challenger /tmp/challenger.py \
