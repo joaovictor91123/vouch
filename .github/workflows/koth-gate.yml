@@ -138,12 +138,13 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           LADDER_BASE: ${{ vars.KOTH_LADDER_BASE }}
         run: |
-          # shellcheck disable=SC2016 # the posted markdown carries literal backticks
           if [ "$BASE_REF" = "$LADDER_BASE" ] && [ -n "$LADDER_BASE" ]; then
             gate_note="auto-merge on dethrone (provisional ladder branch)"
           else
             gate_note="scored only - auto-merge is disabled for base '${BASE_REF}'; a maintainer promotes proven champions to shipped defaults by hand"
           fi
+          # the posted markdown carries literal backticks
+          # shellcheck disable=SC2016
           {
             echo "koth ladder - ${VERDICT}"
             echo
