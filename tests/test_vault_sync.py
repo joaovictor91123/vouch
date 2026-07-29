@@ -153,6 +153,7 @@ def test_approve_then_kb_to_vault_mirrors_without_status_handedit(
 
     result = kb_to_vault(s, vault)
     assert "vault-status-page" in result.pages_mirrored
+    assert "obsidian-status" in result.claims_mirrored
     assert (vault / VAULT_DIR / "pages" / "vault-status-page.md").is_file()
     assert (vault / VAULT_DIR / "claims" / "obsidian-status.md").is_file()
 
@@ -178,6 +179,8 @@ def test_kb_to_vault_removes_mirrors_after_retraction(
     result = kb_to_vault(store, vault)
     assert "alpha-claim" in result.claims_removed
     assert "alpha-page" in result.pages_removed
+    assert "alpha-claim" not in result.claims_mirrored
+    assert "alpha-page" not in result.pages_mirrored
     assert not claim_path.exists()
     assert not page_path.exists()
 

@@ -155,7 +155,7 @@ def _claims_dir(vault_dir: Path) -> Path:
 
 def _approved_pages(store: KBStore) -> Iterable:
     for page in store.list_pages():
-        # Durable pages are written by the review gate (propose defaults to
+        # durable pages are written by the review gate (propose defaults to
         # DRAFT). ARCHIVED is retracted — kb_to_vault deletes stale mirrors.
         if page.status is PageStatus.ARCHIVED:
             continue
@@ -164,9 +164,9 @@ def _approved_pages(store: KBStore) -> Iterable:
 
 def _approved_claims(store: KBStore) -> Iterable:
     for claim in store.list_claims():
-        # Durable claims are written only after the review gate. WORKING is the
+        # durable claims are written only after the review gate. WORKING is the
         # normal post-approve default (#583); ACTIONABLE / STABLE / CONTESTED
-        # are later live states. Retracted statuses stay out; kb_to_vault also
+        # are later live states. retracted statuses stay out; kb_to_vault also
         # deletes leftover mirror files for those ids.
         if claim.status in {
             ClaimStatus.WORKING,
