@@ -455,9 +455,11 @@ def _retrieve(
         if raw:
             filtered = filter_hits(store, raw, viewer, limit=limit)
             # Parity with the hybrid path: an operator who opted into
-            # recency gets it regardless of which backend serves the query.
+            # recency or rerank gets it regardless of which backend serves
+            # the query — both are configured globally, not per backend.
             filtered = _maybe_recency(store, hits=filtered)
             filtered = _maybe_pages_first(store, hits=filtered)
+            filtered = _maybe_rerank(store, query=query, hits=filtered, limit=limit)
             return [(k, i, s, sc, "embedding") for k, i, s, sc in filtered]
         return []
 
@@ -468,6 +470,7 @@ def _retrieve(
                 filtered = filter_hits(store, hits, viewer, limit=limit)
                 filtered = _maybe_recency(store, hits=filtered)
                 filtered = _maybe_pages_first(store, hits=filtered)
+                filtered = _maybe_rerank(store, query=query, hits=filtered, limit=limit)
                 return [(k, i, s, sc, "fts5") for k, i, s, sc in filtered]
         except sqlite3.Error:
             pass
