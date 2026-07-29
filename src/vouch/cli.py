@@ -1494,6 +1494,26 @@ def read_relation(relation_id: str) -> None:
     click.echo(yaml.safe_dump(relation.model_dump(mode="json"), sort_keys=False))
 
 
+@cli.command(name="read-evidence")
+@click.argument("evidence_id")
+def read_evidence(evidence_id: str) -> None:
+    """Read an evidence record by id."""
+    store = _load_store()
+    with _cli_errors():
+        ev = store.get_evidence(evidence_id)
+    click.echo(yaml.safe_dump(ev.model_dump(mode="json"), sort_keys=False))
+
+
+@cli.command(name="read-source")
+@click.argument("source_id")
+def read_source(source_id: str) -> None:
+    """Read a registered source's metadata by id."""
+    store = _load_store()
+    with _cli_errors():
+        src = store.get_source(source_id)
+    click.echo(yaml.safe_dump(src.model_dump(mode="json"), sort_keys=False))
+
+
 @cli.command(name="list-claims")
 def list_claims() -> None:
     """List all approved claims."""

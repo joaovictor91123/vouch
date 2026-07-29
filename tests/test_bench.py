@@ -191,6 +191,17 @@ def test_run_verifiability_stock_scores() -> None:
     assert report["categories"]["supersede-hygiene"]["mean"] == 0.0
 
 
+def test_pack_text_strips_highlight_markers() -> None:
+    # retrieval wraps query-matched terms in guillemets; grading must see
+    # the text, not the markup, or substring checks fail exactly on the
+    # query-relevant claims (and highlighted forbidden values sneak past)
+    pack = {"items": [{"summary": "my limit is 340 «requests» «per» «minute»"}]}
+    text = bench._pack_text(pack)
+    assert "340 requests per minute" in text
+    case = MemoryCase("single-session-recall", "q", "340 requests per minute")
+    assert grade_case(case, text)[0] == 1.0
+
+
 def test_paired_verdict_floor_gatekeeps_zero_se() -> None:
     # identical per-seed diffs collapse the SE; the floor still gates
     verdict = bench.paired_verdict([0.5, 0.5, 0.5], [0.505, 0.505, 0.505])

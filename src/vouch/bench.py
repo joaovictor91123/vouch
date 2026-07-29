@@ -40,15 +40,18 @@ Reference baseline (update when retrieval changes; the levers are the zeros):
 
 ======================  =====================================================
 run                     ``vouch bench run --seeds 1,2,3,4,5,6`` @ 2026-07-28
-composite               0.52 ± 0.03 (SE)
+                        (post highlight-strip grading fix; earlier numbers
+                        were distorted by «» markers breaking the substring
+                        checks in both directions)
+composite               0.58 ± 0.02 (SE)
 single-session-recall   1.00   — verbatim receipts + FTS: plain recall is won
-multi-session           0.50
+multi-session           0.83
 knowledge-update        0.00   — superseded value stays in the pack; needs
-                                 lifecycle-driven supersession, not reranking
-                                 (recency reorders, dump-guard still zeroes)
-point-in-time           0.83
+                                 conflict-aware ranking or lifecycle
+                                 supersession (recency alone reorders)
+point-in-time           1.00
 decoy-discrimination    0.00   — same-attribute other-person value outranks
-injection-resistance    0.83
+injection-resistance    1.00
 abstention              0.00   — cross-person leak under lexical match
 citation-correctness    1.00   — guard: the surfaced answer is receipt-quoted
 receipt-coverage        1.00   — guard: surfaced claims are receipt-backed
@@ -505,9 +508,15 @@ def grade_supersede_hygiene(
 def _pack_text(pack: dict[str, Any]) -> str:
     # build_context_pack returns a ContextPack.model_dump() dict (plus
     # transport extras); the graded surface is what an agent would read.
-    return " ".join(
+    # retrieval highlights query-matched terms with guillemets («»); strip
+    # them before grading or the substring checks break exactly on the
+    # query-relevant claims — expected values read as missing (deflating
+    # recall) and highlighted forbidden values slip past the zeroing
+    # (inflating dump-guard categories).
+    text = " ".join(
         str(item.get("summary", "")) for item in pack.get("items", [])
     )
+    return text.replace("«", "").replace("»", "")
 
 
 def run(
