@@ -7,6 +7,12 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`kb.search` excludes retracted claims and archived pages** (#581):
+  `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
+  `ARCHIVED` pages the same way `kb.context` already does, so lifecycle
+  controls are not decorative on the detail-search surface. backends
+  over-fetch a candidate pool before that filter so retracted top-hits
+  cannot starve the requested result limit.
 - **bench grading saw highlight markup**: retrieval wraps query-matched
   terms in guillemets, which broke the bench's substring checks exactly
   on query-relevant claims — expected values read as missing (deflating
