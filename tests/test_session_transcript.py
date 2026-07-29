@@ -196,14 +196,24 @@ def test_handler_bad_agent_is_invalid_request() -> None:
     assert resp["error"]["code"] == "invalid_request"
 
 
-def test_handler_returns_degraded_when_absent() -> None:
+def test_handler_returns_degraded_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from vouch.jsonl_server import handle_request
+
+    # the degraded path reads the capture buffer, so the handler needs a KB to
+    # resolve; and both locators are pointed at empty dirs so the "absent" this
+    # asserts is the raw transcript's, not the ambient machine's.
+    store = KBStore.init(tmp_path / "kb")
+    monkeypatch.chdir(store.root)
+    monkeypatch.setenv("VOUCH_CLAUDE_PROJECTS_DIR", str(tmp_path / "no-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
 
     resp = handle_request({
         "id": "3", "method": "kb.session_transcript",
         "params": {"session_id": "11111111-1111-1111-1111-111111111111"},
     })
-    assert resp["ok"] is True
+    assert resp["ok"] is True, resp
     assert resp["result"]["available"] is False
 
 
