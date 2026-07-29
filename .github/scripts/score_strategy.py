@@ -7,8 +7,10 @@ the scored code executes only inside the sandbox child.
 
     dethroned  iff  mean(challenger - champion)  >=  max(0.007, 1.96 x SE)
 
-Exit code 0 = dethroned, 3 = held, 1 = error. Unlike the kit lane, a winning
-verdict here does NOT auto-merge: engine code ships only through human review.
+Exit code 0 = dethroned, 3 = held, 1 = error. A dethrone on the ladder
+branch arms auto-merge into the quarantined contrib lane (merged strategies
+only ever execute inside the sandbox); promotion into src/vouch as trusted
+default code still ships through a human-reviewed PR.
 """
 
 from __future__ import annotations
