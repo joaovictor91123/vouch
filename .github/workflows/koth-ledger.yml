@@ -74,6 +74,23 @@ jobs:
               python3 .github/scripts/update_leaderboard.py \
                 --report /tmp/report.json --pr "$pr" --author "$author" \
                 && appended=1
+              # the ratchet: a merged engine-lane dethrone becomes the new
+              # champion, so the next challenger's merge threshold rises
+              # automatically. the winner is the single strategy file the
+              # pr added.
+              lane=$(jq -r '.lane // "kit"' /tmp/report.json)
+              if [ "$lane" = "engine" ]; then
+                mean=$(jq -r '.challenger.mean' /tmp/report.json)
+                winner=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}/files" \
+                  --paginate \
+                  --jq '.[] | select(.status != "removed") | .filename' \
+                  | grep -E '^contrib/strategies/[A-Za-z0-9_]+\.py$' \
+                  | grep -v 'baseline\.py' | head -1 || true)
+                if [ -n "$winner" ] && [ -f "$winner" ]; then
+                  python3 .github/scripts/promote_champion.py \
+                    --strategy "$winner" --pr "$pr" --mean "$mean"
+                fi
+              fi
             fi
           done < /tmp/merged.txt
           echo "sweep done (appended=$appended)"
