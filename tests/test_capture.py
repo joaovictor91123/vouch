@@ -31,6 +31,13 @@ def test_load_config_reads_override(store: KBStore) -> None:
     assert cfg.min_observations == 5
 
 
+def test_load_config_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool("false") is True in plain Python, so a mistakenly
+    quoted `enabled: "false"` previously silently kept capture enabled."""
+    store.config_path.write_text('capture:\n  enabled: "false"\n')
+    assert cap.load_config(store).enabled is False
+
+
 def test_buffer_path_under_captures_dir(store: KBStore) -> None:
     p = cap.buffer_path(store, "sess-123")
     assert p == store.kb_dir / "captures" / "sess-123.jsonl"
@@ -870,6 +877,16 @@ def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
 # --- personal-KB fallback capture through the hook CLI (phase 3) -----------
 
 
+def _turn_mode(store: KBStore) -> None:
+    """Pin the legacy per-turn answer path — these tests exercise the Stop-hook
+    CLI routing, which only files anything under capture.answer_mode: turn."""
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("capture", {})["answer_mode"] = "turn"
+    store.config_path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+
 @pytest.fixture()
 def _fallback_machine(tmp_path_factory, monkeypatch):
     """Fake home + registry + an opted-in personal KB; returns its store."""
@@ -885,6 +902,7 @@ def _fallback_machine(tmp_path_factory, monkeypatch):
     root = hub.personal_kb_root()
     assert root is not None
     personal = KBStore.init(root)
+    _turn_mode(personal)
     hub.register_kb(root, role="personal", actor="t")
     hub.set_personal_fallback(root, True)
     return personal
@@ -939,6 +957,7 @@ def test_answer_cli_project_kb_capture_has_no_origin(
     """A project-KB capture is NOT a fallback: no origin stamp, no tag."""
     proj = tmp_path / "realproj"
     store = KBStore.init(proj)
+    _turn_mode(store)
     monkeypatch.chdir(proj)
     transcript = _long_transcript(tmp_path)
     payload = _json.dumps({

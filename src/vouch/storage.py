@@ -81,17 +81,25 @@ def _starter_config() -> dict[str, Any]:
         "review": {
             "require_human_approval": False,
             "expire_pending_after_days": 90,
+            # auto approval is the default: the capturing agent's proposals
+            # self-approve through the same proposals.approve() gate (one
+            # audit event per artifact, duplicates rejected, protected page
+            # kinds and DELETE proposals still held for a reviewer). Remove
+            # approver_role to put every other write behind `vouch review`.
+            "approver_role": "trusted-agent",
             # phase d — the receipt is the reviewer. When true, a claim whose
             # byte-offset receipts all verify is auto-approved with no human;
-            # a claim that cannot quote its source is left pending, as is
-            # every page/entity/relation proposal. Set false to put every
-            # write behind `vouch review`.
+            # a claim that cannot quote its source is left pending. Only
+            # consulted when approver_role does not already clear the write.
             "auto_approve_on_receipt": True,
         },
         "capture": {
             # auto-capture agent sessions into pending summaries.
             "enabled": True,
             "min_observations": 3,
+            # answer memory: "session" extracts claims once at SessionEnd from
+            # the full transcript; "turn" files claims on every Stop hook.
+            "answer_mode": "session",
             "split": {
                 # llm topical split for large sessions; llm_cmd falls back to
                 # compile.llm_cmd when null. see session_split.py.
@@ -130,6 +138,11 @@ def _starter_config() -> dict[str, Any]:
             "prompt_gate": {
                 "enabled": True,
             },
+            # the reigning engine-lane champion, applied as the final
+            # reorder stage of every context pack (see vouch.strategies).
+            # new KBs get it on; existing KBs keep byte-identical ordering
+            # until they add this key. set to null to opt out.
+            "strategy": "vouch.strategies.provenance",
         },
         "agents": {
             "recommended_loop": [
@@ -428,8 +441,13 @@ class KBStore:
             schema_version_file.write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         gi = kb.kb_dir / ".gitignore"
         if not gi.exists():
-            # state.db is derived; proposed/ is the agent's scratch space.
-            gi.write_text("proposed/\ncaptures/\nstate.db\nstate.db-*\n", encoding="utf-8")
+            # state.db is derived; proposed/ is the agent's scratch space;
+            # retrieval_events is local telemetry (see retrieval_events.py).
+            gi.write_text(
+                "proposed/\ncaptures/\nretrieval_events.jsonl*\n"
+                "state.db\nstate.db-*\n",
+                encoding="utf-8",
+            )
         return kb
 
     # --- identity ----------------------------------------------------------

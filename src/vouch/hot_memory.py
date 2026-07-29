@@ -126,6 +126,8 @@ HOT_MEMORY_COVERED: frozenset[str] = frozenset({
     "kb.read_claim",
     "kb.read_entity",
     "kb.read_relation",
+    "kb.read_evidence",
+    "kb.read_source",
     "kb.list_pages",
     "kb.list_claims",
     "kb.list_entities",
