@@ -70,6 +70,19 @@ def _store() -> KBStore:
         ) from e
 
 
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
+
+
 def _agent() -> str:
     # An authenticated bearer subject (set by the /mcp transport) is the
     # principal's real identity and must be what proposals/audit attribute to,
@@ -685,12 +698,13 @@ def kb_session_transcript(session_id: str, agent: str | None = None) -> dict[str
     Read-only. Locates the raw Claude Code / Codex file on disk and normalizes
     it into message blocks (text, thinking, tool_use with paired results).
     ``agent`` restricts the search ("claude" | "codex"); omit to try both.
-    Degrades to compact capture observations when the raw file is unavailable.
+    Degrades to compact capture observations when the raw file is unavailable,
+    and to a bare unavailable result when no KB resolves at all.
     """
     from . import transcript
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 @mcp.tool()
