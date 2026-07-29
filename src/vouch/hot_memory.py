@@ -271,8 +271,8 @@ def compute_hot_memory(
     query_norm = _normalise_query(query)
     excluded = frozenset(exclude_ids or ())
 
-    # Cache the unfiltered ranking only. Exclusions are applied while
-    # filling so a cached top-N window is not required to contain every
+    # cache the unfiltered ranking only. exclusions are applied while
+    # filling so a cached top-n window is not required to contain every
     # survivor — when excludes are present we recompute (cheap: one
     # list_claims pass) so the sidebar can still reach ``limit``.
     if not excluded:

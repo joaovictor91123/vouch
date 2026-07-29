@@ -140,7 +140,9 @@ def test_exclude_ids_still_fills_limit(store: KBStore) -> None:
     eligible claims remain — search/context pass hit ids here so the
     sidebar can surface *other* hot claims."""
     ids = [_approved_claim(store, f"claim-{i}") for i in range(8)]
-    # Exclude the three most recent; five older ones remain.
+    # Warm the unfiltered cache first so a buggy reuse of those rows
+    # would underfill after exclusions.
+    hot_mod.compute_hot_memory(store, limit=5)
     rows = hot_mod.compute_hot_memory(
         store, limit=5, exclude_ids=ids[-3:],
     )
