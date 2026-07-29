@@ -7,6 +7,11 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
+  `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
+  longer raises `AttributeError` while building the docker command.
+- **`kb.session_transcript` handler test needs a KB** : `test_handler_returns_degraded_when_absent` now chdirs into a temp KB and points Claude/Codex search roots at empty dirs, so the handler can return the degraded payload instead of raising `KBNotFoundError`.
+)
 - **`kb.search` excludes retracted claims and archived pages** (#581):
   `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
   `ARCHIVED` pages the same way `kb.context` already does, so lifecycle
