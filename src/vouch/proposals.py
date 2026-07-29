@@ -7,6 +7,7 @@ proposal lifecycle, and writes audit events for every mutation.
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,8 +17,10 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from . import audit, index_db
+from . import admission, audit, index_db
+from .config_coerce import coerce_bool
 from .models import (
+    ArtifactScope,
     Claim,
     Entity,
     Page,
@@ -25,8 +28,10 @@ from .models import (
     ProposalKind,
     ProposalStatus,
     Relation,
+    _coerce_artifact_scope,
 )
 from .page_kinds import PageKindError, load_page_kind_registry, validate_page
+from .scoping import viewer_from
 from .storage import ArtifactNotFoundError, KBStore
 
 
@@ -34,8 +39,45 @@ class ProposalError(RuntimeError):
     pass
 
 
+class DeadClaimRefsError(ProposalError):
+    """Approval blocked: the page payload cites claim ids that no longer exist.
+
+    Raised instead of a bare ProposalError so interactive surfaces (CLI
+    prompt, console dialog) can detect the case, show the missing ids, and
+    retry the approve with drop_missing_claims=True. Claims can disappear
+    between propose and approve — archived, redacted, or removed in a bulk
+    clear — so this is a normal reviewer decision, not a corrupt proposal.
+    """
+
+    def __init__(self, proposal_id: str, missing: list[str]) -> None:
+        self.proposal_id = proposal_id
+        self.missing = list(missing)
+        super().__init__(
+            f"page proposal {proposal_id} references missing claim(s): "
+            + ", ".join(self.missing)
+            + " — approve with drop_missing_claims to strip the dead "
+            "references, or reject the proposal"
+        )
+
+
+def strip_claim_markers(body: str, ids: list[str]) -> str:
+    """Remove inline `[claim: <id>]` markers for `ids` from a page body."""
+    for cid in ids:
+        body = re.sub(rf"\s*\[claim:\s*{re.escape(cid)}\]", "", body)
+    return body
+
+
+def missing_claim_refs(store: KBStore, proposal: Proposal) -> list[str]:
+    """Claim ids a PAGE proposal cites that don't resolve to a claim file."""
+    if proposal.kind != ProposalKind.PAGE:
+        return []
+    refs = proposal.payload.get("claims") or []
+    return [cid for cid in refs if not store._claim_path(cid).exists()]
+
+
 EXPIRE_REASON = "expired"
 EXPIRE_ACTOR = "vouch-expire"
+ADMISSION_ACTOR = "vouch-admission"
 _DEFAULT_EXPIRE_PENDING_DAYS = 90
 
 
@@ -66,6 +108,48 @@ def new_proposal_id() -> str:
     # naturally show oldest pending first, which matches review intuition.
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     return f"{ts}-{uuid.uuid4().hex[:8]}"
+
+
+def default_scope(store: KBStore) -> dict[str, str] | None:
+    """The stamp every new claim/page proposal carries: this KB's own project.
+
+    Scope cannot be retrofitted once KBs start sharing artifacts, so it is
+    recorded at write time. The stamp resolves through the SAME chain the
+    read-side viewer uses (``scoping.viewer_from``: VOUCH_PROJECT >
+    retrieval.scope > the durable ``kb.id``) so what a KB writes it can
+    always read back — including across a ``kb.name`` rename, which is why
+    the terminal fallback is the id, never the display name. None (no
+    stamp, today's behaviour) for KBs with no identity and no configured
+    scope.
+    """
+    project = viewer_from(config_path=store.config_path).project
+    if project is None:
+        return None
+    return {"visibility": "project", "project": project}
+
+
+def _stamp_scope(
+    store: KBStore, payload: dict[str, Any], scope: dict[str, Any] | str | None
+) -> None:
+    """Attach an explicit scope, or the KB's own default, to a payload.
+
+    An explicit scope is validated here, at the gate: a malformed one filed
+    into a payload would otherwise crash every audit read surface (which
+    resolves payload scopes for visibility) and escape ``approve()`` as a
+    raw pydantic error.
+    """
+    if scope is None:
+        stamp = default_scope(store)
+        if stamp is not None:
+            payload["scope"] = stamp
+        return
+    try:
+        coerced = _coerce_artifact_scope(scope)
+        validated = coerced if isinstance(coerced, ArtifactScope) \
+            else ArtifactScope.model_validate(coerced)
+    except (ValidationError, ValueError) as e:
+        raise ProposalError(f"invalid scope: {e}") from e
+    payload["scope"] = validated.model_dump(mode="json")
 
 
 def _file_proposal(
@@ -99,6 +183,19 @@ def _file_proposal(
         store.kb_dir, event=f"proposal.{kind.value}.create", actor=proposed_by,
         object_ids=[proposal.id], data={"slug_hint": payload.get("id")},
     )
+    # Admission gate: deterministic, receipt-safe floor on knowledge-shaped
+    # garbage. It only *blocks* the passive auto-capture firehoses; a deliberate
+    # author's write is advisory-only and passes straight through to the review
+    # gate. Filing-then-rejecting (rather than dropping) keeps the audit log as
+    # the authoritative record of what was refused and why.
+    if proposed_by in admission.AUTO_CAPTURE_ACTORS:
+        verdict = admission.assess(kind.value, payload, admission.load_config(store))
+        if not verdict.admit:
+            return reject(
+                store, proposal.id,
+                rejected_by=ADMISSION_ACTOR,
+                reason=f"admission: {verdict.reason}",
+            )
     return proposal
 
 
@@ -116,6 +213,7 @@ def propose_claim(
     slug_hint: str | None = None,
     session_id: str | None = None,
     dry_run: bool = False,
+    scope: dict[str, Any] | str | None = None,
 ) -> ProposeClaimResult:
     if not text.strip():
         raise ProposalError("claim text is empty")
@@ -140,6 +238,7 @@ def propose_claim(
         "entities": entities or [],
         "tags": tags or [],
     }
+    _stamp_scope(store, payload, scope)
     exclude_claim: str | None = None
     if (store.kb_dir / "claims" / f"{claim_id}.yaml").exists():
         exclude_claim = claim_id
@@ -177,6 +276,7 @@ def propose_quoted_claim(
     rationale: str | None = None,
     slug_hint: str | None = None,
     session_id: str | None = None,
+    scope: dict[str, Any] | str | None = None,
 ) -> ProposeClaimResult | None:
     """File a claim backed by a byte-offset receipt into ``source_id``, or drop.
 
@@ -203,7 +303,7 @@ def propose_quoted_claim(
         store, text=text, evidence=[evidence.id], proposed_by=proposed_by,
         claim_type=claim_type, confidence=confidence, entities=entities,
         tags=tags, rationale=rationale, slug_hint=slug_hint,
-        session_id=session_id,
+        session_id=session_id, scope=scope,
     )
 
 
@@ -223,6 +323,7 @@ def propose_page(
     slug_hint: str | None = None,
     session_id: str | None = None,
     dry_run: bool = False,
+    scope: dict[str, Any] | str | None = None,
 ) -> Proposal:
     if not title.strip():
         raise ProposalError("page title is empty")
@@ -269,6 +370,7 @@ def propose_page(
         "tags": tags or [],
         "metadata": meta,
     }
+    _stamp_scope(store, payload, scope)
     return _file_proposal(
         store, kind=ProposalKind.PAGE, payload=payload,
         proposed_by=proposed_by, session_id=session_id,
@@ -412,7 +514,16 @@ def propose_delete(
 
 
 def _review_config(store: KBStore) -> dict[str, Any]:
-    """The ``review:`` section of config.yaml, or {} if absent/unreadable."""
+    """the ``review:`` section of config.yaml, or {} if absent/unreadable.
+
+    ``auto_approve_on_receipt`` is normalized to a real bool here -- the
+    single source of truth every caller below reads from -- so a
+    mistakenly-quoted ``auto_approve_on_receipt: "false"`` in config.yaml
+    can never be silently treated as enabled by one call site while another
+    (correctly) treats the same value as disabled. callers that still wrap
+    this in their own ``bool(...)`` are unaffected: bool() on an already-real
+    bool is a no-op.
+    """
     try:
         loaded = yaml.safe_load(
             (store.kb_dir / "config.yaml").read_text(encoding="utf-8")
@@ -420,7 +531,11 @@ def _review_config(store: KBStore) -> dict[str, Any]:
     except Exception:
         return {}
     if isinstance(loaded, dict) and isinstance(loaded.get("review"), dict):
-        return loaded["review"]
+        review = dict(loaded["review"])
+        review["auto_approve_on_receipt"] = coerce_bool(
+            review.get("auto_approve_on_receipt"), False
+        )
+        return review
     return {}
 
 
@@ -478,33 +593,135 @@ def _approval_block_reason(
     return None
 
 
+def resolve_pending_receipt_claim(
+    store: KBStore, proposal: Proposal, *, actor: str, reason: str
+) -> Claim | None:
+    """Mechanically decide one pending CLAIM proposal, honouring the gate.
+
+    Returns the durable Claim when self-approval clears — under
+    ``review.approver_role: trusted-agent``, or when the claim's byte-offset
+    receipts all verify under ``review.auto_approve_on_receipt``. Returns None
+    when the proposal stays pending (gate closed, receipts unverifiable, or
+    its id is held by a claim with *different* text — a real conflict, a human
+    call) or when it was rejected as a duplicate: re-deriving a claim whose
+    identical text is already durable adds nothing, so the proposal is closed
+    with a duplicate reason instead of piling up in the review queue.
+    """
+    if proposal.kind != ProposalKind.CLAIM:
+        return None
+    if proposal.status is not ProposalStatus.PENDING:
+        # The admission gate may have auto-rejected this proposal at filing time
+        # (file-then-reject in _file_proposal). A decided proposal has nothing to
+        # resolve — approving it would raise. Skip so the capture loop survives a
+        # rejected fragment and still approves the good claims beside it.
+        return None
+    review_cfg = _review_config(store)
+    trusted = review_cfg.get("approver_role") == "trusted-agent"
+    receipted = bool(
+        review_cfg.get("auto_approve_on_receipt")
+    ) and _claim_receipts_verify(store, proposal)
+    if not (trusted or receipted):
+        return None
+    claim_id = str(proposal.payload.get("id", ""))
+    existing: Claim | None = None
+    if claim_id:
+        try:
+            existing = store.get_claim(claim_id)
+        except ArtifactNotFoundError:
+            existing = None
+    if existing is not None:
+        if existing.text == proposal.payload.get("text"):
+            reject(
+                store, proposal.id, rejected_by=actor,
+                reason="duplicate: identical claim already durable",
+            )
+        return None
+    result = approve(store, proposal.id, approved_by=actor, reason=reason)
+    assert isinstance(result, Claim)  # kind == CLAIM guaranteed above
+    return result
+
+
 def auto_approve_receipts(
     store: KBStore, *, actor: str | None = None
 ) -> list[Claim]:
     """Approve every pending receipt-verified claim, no human in the loop.
 
     The mechanical gate is the reviewer: a pending CLAIM whose citations all
-    carry receipts that verify by string comparison is approved; anything else
-    — a bare source id, a forged or missing receipt, a non-claim proposal — is
-    left pending for a human. This is the drain that makes "run vouch and it
-    just captures knowledge" real. No-op unless ``review.auto_approve_on_receipt``
-    is set, so the human-review gate is never silently bypassed.
+    carry receipts that verify by string comparison is approved; a duplicate
+    of an already-durable identical claim is rejected (see
+    ``resolve_pending_receipt_claim``); anything else — a bare source id, a
+    forged or missing receipt, a non-claim proposal, an id held by different
+    text — is left pending for a human. This is the drain that makes "run
+    vouch and it just captures knowledge" real. No-op unless
+    ``review.auto_approve_on_receipt`` is set, so the human-review gate is
+    never silently bypassed.
     """
     if not _review_config(store).get("auto_approve_on_receipt"):
         return []
     approved: list[Claim] = []
     for proposal in store.list_proposals(ProposalStatus.PENDING):
-        if proposal.kind != ProposalKind.CLAIM or not _claim_receipts_verify(
-            store, proposal
-        ):
-            continue
-        result = approve(
-            store, proposal.id,
-            approved_by=actor or proposal.proposed_by,
+        claim = resolve_pending_receipt_claim(
+            store, proposal,
+            actor=actor or proposal.proposed_by,
             reason="receipt verified — auto-approved",
         )
-        assert isinstance(result, Claim)  # kind == CLAIM guaranteed above
-        approved.append(result)
+        if claim is not None:
+            approved.append(claim)
+    return approved
+
+
+def auto_approve_pending(
+    store: KBStore, *, actor: str | None = None
+) -> list[Claim | Page | Entity | Relation]:
+    """Approve every pending proposal the configured gate allows.
+
+    The full drain behind auto-approval-by-default. Under
+    ``review.approver_role: trusted-agent`` every pending proposal
+    self-approves through the normal ``approve()`` path — one audit event
+    per artifact, never a parallel write path. Claims go through
+    ``resolve_pending_receipt_claim`` so duplicates of durable claims are
+    closed instead of piling up; pages, entities and relations are approved
+    unless something still blocks them. What stays pending is exactly the
+    human-call residue: protected page kinds, pages with dead claim
+    references, an id already durable with different content, and DELETE
+    proposals (retracting durable knowledge is never drained mechanically).
+
+    Without trusted-agent this falls back to the receipt drain
+    (``auto_approve_receipts``), which is itself a no-op when
+    ``review.auto_approve_on_receipt`` is off — the review gate is honoured,
+    never silently bypassed.
+    """
+    review_cfg = _review_config(store)
+    if review_cfg.get("approver_role") != "trusted-agent":
+        return list(auto_approve_receipts(store, actor=actor))
+    approved: list[Claim | Page | Entity | Relation] = []
+    for proposal in store.list_proposals(ProposalStatus.PENDING):
+        if proposal.kind == ProposalKind.DELETE:
+            continue
+        if proposal.kind == ProposalKind.CLAIM:
+            claim = resolve_pending_receipt_claim(
+                store, proposal,
+                actor=actor or proposal.proposed_by,
+                reason="trusted-agent — auto-approved",
+            )
+            if claim is not None:
+                approved.append(claim)
+            continue
+        approver = actor or proposal.proposed_by
+        if check_approvable(store, proposal.id, approved_by=approver) is not None:
+            continue
+        try:
+            approved.append(
+                approve(
+                    store, proposal.id, approved_by=approver,
+                    reason="trusted-agent — auto-approved",
+                )
+            )
+        except ProposalError:
+            # check_approvable is a dry-run; the write itself can still fail
+            # (e.g. a claim ref deleted between check and approve). Left
+            # pending for a human, the drain survives.
+            continue
     return approved
 
 
@@ -603,17 +820,25 @@ def approve(
     *,
     approved_by: str,
     reason: str | None = None,
+    drop_missing_claims: bool = False,
 ) -> Claim | Page | Entity | Relation:
     """Approve a pending proposal and write it as a durable artifact.
 
     Raises ProposalError if the proposal is not pending or if
     approved_by matches proposed_by (forbidden_self_approval).
+
+    A PAGE proposal citing claim ids that no longer exist raises
+    DeadClaimRefsError so the reviewer can decide: retry with
+    drop_missing_claims=True to strip the dead references (frontmatter list
+    and inline `[claim: …]` markers) and approve what remains — the dropped
+    ids are recorded in the audit event.
     """
     proposal = store.get_proposal(proposal_id)
     block = _approval_block_reason(store, proposal, approved_by)
     if block:
         raise ProposalError(block)
     payload = dict(proposal.payload)
+    dropped_claims: list[str] = []
     # Refuse to overwrite an existing artifact. Without this guard a retry
     # after a crash between put_<kind>() and move_proposal_to_decided() would
     # silently rewrite the artifact with new approved_by / created_at metadata.
@@ -639,6 +864,16 @@ def approve(
             )
         result = claim
     elif proposal.kind == ProposalKind.PAGE:
+        missing = missing_claim_refs(store, proposal)
+        if missing:
+            if not drop_missing_claims:
+                raise DeadClaimRefsError(proposal.id, missing)
+            payload["claims"] = [
+                c for c in (payload.get("claims") or []) if c not in missing
+            ]
+            if isinstance(payload.get("body"), str):
+                payload["body"] = strip_claim_markers(payload["body"], missing)
+            dropped_claims = missing
         page = Page(**payload)
         # Re-validate the kind at the gate: config may have tightened (or a
         # kind been removed) between propose and approve. Built-in kinds pass
@@ -697,10 +932,13 @@ def approve(
     # a crash between the two must leave a pending proposal WITH its decision
     # event (recoverable; retry is blocked by _ensure_no_existing_artifact),
     # never a decided proposal without one.
+    decision_data: dict[str, Any] = {"reason": reason}
+    if dropped_claims:
+        decision_data["dropped_claims"] = dropped_claims
     audit.log_event(
         store.kb_dir, event=f"proposal.{proposal.kind.value}.approve",
         actor=approved_by, object_ids=[proposal.id, result.id],
-        data={"reason": reason},
+        data=decision_data,
     )
     store.move_proposal_to_decided(proposal)
     return result
