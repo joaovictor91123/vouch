@@ -55,6 +55,7 @@ from typing import Any, cast
 import uvicorn
 import yaml
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -201,18 +202,31 @@ async def _rpc(request: Request) -> JSONResponse:
         ))
 
     agent = request.headers.get("X-Vouch-Agent")
-    reset = jsonl_server._actor.set(agent) if agent else None
     bearer = trust_mod.matched_bearer_token(
         request.headers.get("authorization"),
         tuple(getattr(request.app.state, "vouch_bearer_tokens", ()) or ()),
     )
     trust = trust_mod.with_auth_subject(trust_mod.JSONL_HTTP, bearer)
-    try:
-        with trust_mod.trust_context(trust):
-            response = jsonl_server.handle_request(envelope)
-    finally:
-        if reset is not None:
-            jsonl_server._actor.reset(reset)
+
+    def _dispatch() -> dict[str, Any]:
+        # The actor and the trust marker are both ContextVars. They're set
+        # here, inside the worker, so each request mutates only its own copy
+        # of the context — set on the event loop instead, two concurrent
+        # calls would overwrite each other's caller identity.
+        reset = jsonl_server._actor.set(agent) if agent else None
+        try:
+            with trust_mod.trust_context(trust):
+                return jsonl_server.handle_request(envelope)
+        finally:
+            if reset is not None:
+                jsonl_server._actor.reset(reset)
+
+    # handle_request is synchronous and reads the whole KB off disk — seconds
+    # of work on a large one. Called inline it blocks the event loop, so every
+    # other request (health probes included) queues behind it and clients see
+    # the endpoint as hung. The /mcp surface already dispatches its sync tools
+    # through a worker thread; this keeps /rpc consistent with it.
+    response = await run_in_threadpool(_dispatch)
     return _json(200, response)
 
 

@@ -211,7 +211,7 @@ def test_handler_returns_degraded_when_absent(
         "id": "3", "method": "kb.session_transcript",
         "params": {"session_id": "11111111-1111-1111-1111-111111111111"},
     })
-    assert resp["ok"] is True
+    assert resp["ok"] is True, resp
     assert resp["result"]["available"] is False
 
 
