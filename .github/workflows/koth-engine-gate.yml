@@ -1,21 +1,31 @@
-# koth engine gate - scores strategy (ranking-code) submissions.
+# koth engine gate - scores strategy (ranking-code) submissions and, on a
+# dethrone against the ladder branch, arms auto-merge: the benchmark decides
+# what enters the quarantined contrib lane, with no human in the loop.
 #
-# the deliberate contrast with koth-gate.yml (the kit lane): a kit is data
-# and auto-merges; a STRATEGY is code and NEVER auto-merges. this job has no
-# write token, holds no secrets, and merges nothing. it scores the submission
-# in a sandbox and posts a scorecard + leaderboard note; a human reviews the
-# code and merges it as a new default if it wins. that human review is the
-# review gate applied to engine code.
+# what keeps that sane - the containment contract, all three parts:
+#   1. merged strategies are QUARANTINED code: everything that executes a
+#      contrib strategy (both gates, the local bench loop) runs it through
+#      the sandbox child (vouch.strategy.run_sandboxed). nothing imports
+#      contrib code in-process, and the ledger/ratchet scripts treat the
+#      winner as text (promote_champion.py copies bytes, imports nothing).
+#   2. the scoring job never holds a write token. it executes the untrusted
+#      challenger, so it gets contents: read + the comment scope only; the
+#      arm job below holds the write scopes, checks out nothing, and runs
+#      no challenger code - it turns the verdict into a merge, that is all.
+#      accepted residual: a sandbox escape during scoring can forge the
+#      verdict and land its own PR in contrib/ - inside the quarantine.
+#   3. shipped defaults stay human. auto-merge fires only when the PR base
+#      is the ladder branch (KOTH_LADDER_BASE); promotion of a champion
+#      into src/vouch as trusted, importable default code remains a
+#      human-reviewed PR. the benchmark is never the sole gate to code
+#      users install.
 #
-# security model:
+# security model of the scoring job itself (unchanged):
 #   - pull_request_target: the workflow, the grader (score_strategy.py), and
 #     the champion strategy all come from the BASE branch. only the challenger
 #     .py is read from the PR, and it is executed ONLY inside the sandbox
 #     child (vouch.strategy.run_sandboxed: rlimits + an audit hook blocking
 #     network/subprocess/writes).
-#   - permissions: contents: read only. even a full sandbox escape lands on
-#     an ephemeral runner with a read-only token and no secrets, and cannot
-#     merge itself.
 name: koth-engine-gate
 
 on:
@@ -35,7 +45,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      pull-requests: write   # scorecard comment only - no merge
+      pull-requests: write   # scorecard comment only - the merge lives in `arm`
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+      verdict: ${{ steps.score.outputs.verdict }}
     steps:
       - name: checkout base branch (trusted code only)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -136,7 +149,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           VERDICT: ${{ steps.score.outputs.verdict }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          LADDER_BASE: ${{ vars.KOTH_LADDER_BASE }}
         run: |
+          if [ "$BASE_REF" = "$LADDER_BASE" ] && [ -n "$LADDER_BASE" ]; then
+            gate_note="auto-merge on dethrone (quarantined contrib lane: merged strategies only ever run inside the sandbox; shipped defaults still require a human PR)"
+          else
+            gate_note="scored only - auto-merge is disabled for base '${BASE_REF}'; a maintainer reviews and merges winners here"
+          fi
           {
             echo "koth engine lane - ${VERDICT}"
             echo
@@ -144,10 +164,10 @@ jobs:
             cat /tmp/engine-report.json
             echo '```'
             echo
-            echo "engine code is NOT auto-merged. a winning strategy earns the"
-            echo "leaderboard place; a maintainer reviews the code and merges it"
-            echo "as a new default. the daily result is provisional (public seeds)"
-            echo "- payout rank is settled by the monthly sealed run."
+            echo "${gate_note}."
+            echo
+            echo "the daily result is provisional (public seeds) - payout rank"
+            echo "is settled by the monthly sealed run."
           } > /tmp/comment.md
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --body-file /tmp/comment.md
@@ -158,7 +178,36 @@ jobs:
           VERDICT: ${{ steps.score.outputs.verdict }}
         run: |
           echo "verdict: ${VERDICT}"
-          # a held challenger is a green, informational result - nothing merges
-          # here regardless, so the gate never blocks. a scoring error already
-          # failed the job above.
+          # a held challenger is a green, informational result, and the arm
+          # job merges nothing for it. a scoring error already failed the
+          # job above.
           exit 0
+
+  # the write-capable half, deliberately separated from the job that
+  # executes the untrusted challenger: this job checks out nothing, runs no
+  # challenger code, and touches no file from the PR - it reads the gate's
+  # verdict and arms native auto-merge, exactly like the kit lane. the
+  # merge itself is performed by github once required checks are green.
+  # auto-merge fires ONLY when the PR base is the dedicated ladder branch
+  # (repo variable KOTH_LADDER_BASE): the trunk keeps human review, and a
+  # champion reaches shipped defaults only through a human PR.
+  arm:
+    needs: gate
+    if: >-
+      needs.gate.outputs.mode == 'engine' &&
+      needs.gate.outputs.verdict == 'dethroned' &&
+      vars.KOTH_LADDER_BASE != '' &&
+      github.event.pull_request.base.ref == vars.KOTH_LADDER_BASE
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write        # auto-merge (squash) needs it
+      pull-requests: write   # enable auto-merge
+    steps:
+      - name: enable auto-merge on dethrone (ladder branch only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --auto --squash

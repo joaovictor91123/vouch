@@ -28,8 +28,8 @@ places:
 |---|---|---|
 | what you submit | `competition/kits/current/kit.yaml` (data) | `contrib/strategies/<name>.py` (code) |
 | scored by | vouchbench, config arm | vouchbench, sandboxed strategy arm |
-| on a win | **auto-merges** (data cannot execute) | leaderboard + payout; **never auto-merges** |
-| how it ships | promoted to defaults by a human PR | reviewed and merged by a human |
+| on a win | **auto-merges** (data cannot execute) | leaderboard + payout; **auto-merges into the quarantined contrib lane** (ladder branch only) |
+| how it ships | promoted to defaults by a human PR | merged code stays sandbox-executed; promoted to trusted defaults by a human PR |
 
 ## the interface
 
@@ -77,12 +77,23 @@ strategy simply fails to improve; it cannot take down scoring.
 ### the honest boundary
 
 an in-process python guard cannot stop a determined native-code escape. it is
-defence in depth, not the trust root. the real boundary is the same one ditto
-relies on: the scoring job runs on an ephemeral CI runner with a **read-only
-token and no secrets**, and **engine code is never auto-merged**. the benchmark
-decides the *rank*; a human reviewing the diff decides what *ships*. if you
-ever score submissions off ephemeral CI, add OS-level isolation (a container,
-nsjail, or gVisor) before trusting the audit hook alone.
+defence in depth, not the trust root. the trust root has two parts:
+
+- **the scoring job runs on an ephemeral CI runner with a read-only token
+  and no secrets.** the write-capable arm job is a separate job that checks
+  out nothing and runs no challenger code — it only turns the verdict into
+  a native auto-merge. accepted residual: an escape during scoring can
+  forge the verdict and land its own PR — inside the quarantine below.
+- **merged strategy code is quarantined, not trusted.** everything that
+  executes a contrib strategy (both gates, the local bench loop) runs it
+  through the sandbox child; the ledger and ratchet scripts treat it as
+  text and import nothing. the benchmark decides the *rank* and the merge;
+  a human reviewing the diff still decides what *ships* — promotion into
+  `src/vouch` as importable default code is a human PR, and auto-merge is
+  confined to the dedicated ladder branch (`KOTH_LADDER_BASE`).
+
+if you ever score submissions off ephemeral CI, add OS-level isolation (a
+container, nsjail, or gVisor) before trusting the audit hook alone.
 
 ## reproduce locally
 
