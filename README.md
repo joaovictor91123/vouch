@@ -1,5 +1,7 @@
 # vouch
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.vouchdev%2Fvouch.svg)](https://mcptoplist.com/server/io.github.vouchdev%2Fvouch)
+
 **Git-native, review-gated knowledge base for LLM agents. MCP server + JSONL tool server + CLI.**
 
 <!-- mcp-name: io.github.vouchdev/vouch -->
