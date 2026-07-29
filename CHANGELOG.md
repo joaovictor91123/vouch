@@ -122,6 +122,15 @@ All notable changes to vouch are documented here. Format follows
   per-prompt block, the session banner, `vouch status` and the opt-in
   question all say so rather than calling it "this repo's" knowledge.
 
+### Fixed
+- `clear` reads a naive `before` as utc instead of raising. a date-only
+  cutoff — `2026-07-01`, the shape the cli help, the console's own error
+  text, and the `kb.clear` docs all advertise — parses naive, and comparing
+  it against a claim's aware `created_at` raised `TypeError`: a traceback
+  from `vouch claims-clear --before`, an error response over mcp/jsonl, and
+  an unhandled 500 on the review console's `/clear-claims`. normalised at
+  the `lifecycle.clear_claims` chokepoint, so all four surfaces are fixed
+  at once; the audit event records the normalised cutoff.
 ### Added
 - **ingest selection knob (`vouch ingest --max-claims / --budget-chars`).**
   capture used to file every substantive sentence of a source — complete,
