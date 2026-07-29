@@ -7,6 +7,12 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **vault sync mirrors post-approve WORKING/DRAFT artifacts** (#583):
+  `kb_to_vault` now includes durable `WORKING` claims and `DRAFT` pages
+  (the propose+approve defaults), so Obsidian mirrors fill without
+  hand-editing status. `ARCHIVED` pages and retracted claims stay out,
+  and stale mirror files are deleted so the vault cannot keep serving
+  dead knowledge.
 - **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
   `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
   longer raises `AttributeError` while building the docker command.
