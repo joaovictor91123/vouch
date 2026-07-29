@@ -266,27 +266,45 @@ def kb_to_vault(store: KBStore, vault_dir: Path) -> VaultSyncResult:
         dst.write_text(body, encoding="utf-8")
         result.claims_mirrored.append(claim.id)
 
-    # Drop mirrors for artifacts that left the live set (#583).
-    for path in list(mirror.glob("*.md")):
-        page_id = path.stem
-        if page_id not in live_page_ids:
-            path.unlink(missing_ok=True)
-            result.pages_removed.append(page_id)
-    for path in list(claims_out.glob("*.md")):
-        claim_id = path.stem
-        if claim_id not in live_claim_ids:
-            path.unlink(missing_ok=True)
-            result.claims_removed.append(claim_id)
+    # Drop previously mirrored files for artifacts that left the live set
+    # (#583). only touch paths recorded in sync state — untracked user files
+    # under vouch/pages or vouch/claims are left alone (vault_to_kb already
+    # skips them as non-edits).
+    prev_state = _load_state(vault_dir)
+    for rel in prev_state:
+        if rel.startswith("pages/"):
+            page_id = Path(rel).stem
+            if page_id in live_page_ids:
+                continue
+            path = mirror / f"{page_id}.md"
+            if path.is_file():
+                path.unlink()
+                result.pages_removed.append(page_id)
+        elif rel.startswith("claims/"):
+            claim_id = Path(rel).stem
+            if claim_id in live_claim_ids:
+                continue
+            path = claims_out / f"{claim_id}.md"
+            if path.is_file():
+                path.unlink()
+                result.claims_removed.append(claim_id)
 
-    # Refresh state file: record the hash of every mirrored file so the next
-    # forward pass can detect user edits as "current content != recorded hash".
+    # Refresh state for live mirrors only — do not absorb untracked user
+    # files into sync state (that would make the next forward pass treat
+    # them as editable KB pages).
     new_state: dict[str, str] = {}
-    for f in mirror.glob("*.md"):
-        rel = f"pages/{f.name}"
-        new_state[rel] = _sha256_text(f.read_text(encoding="utf-8"))
-    for f in claims_out.glob("*.md"):
-        rel = f"claims/{f.name}"
-        new_state[rel] = _sha256_text(f.read_text(encoding="utf-8"))
+    for page_id in live_page_ids:
+        f = mirror / f"{page_id}.md"
+        if f.is_file():
+            new_state[f"pages/{page_id}.md"] = _sha256_text(
+                f.read_text(encoding="utf-8")
+            )
+    for claim_id in live_claim_ids:
+        f = claims_out / f"{claim_id}.md"
+        if f.is_file():
+            new_state[f"claims/{claim_id}.md"] = _sha256_text(
+                f.read_text(encoding="utf-8")
+            )
     _save_state(vault_dir, new_state)
 
     return result

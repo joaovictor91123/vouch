@@ -185,6 +185,24 @@ def test_kb_to_vault_removes_mirrors_after_retraction(
     assert not page_path.exists()
 
 
+def test_kb_to_vault_preserves_untracked_user_files(
+    store: KBStore, vault: Path,
+) -> None:
+    """Cleanup must not delete markdown the user dropped into the mirror
+    dirs — those are skipped by vault_to_kb and are not vouch-owned."""
+    kb_to_vault(store, vault)
+    user_page = vault / VAULT_DIR / "pages" / "my-note.md"
+    user_claim = vault / VAULT_DIR / "claims" / "scratch.md"
+    user_page.write_text("# my note\n", encoding="utf-8")
+    user_claim.write_text("# scratch\n", encoding="utf-8")
+
+    result = kb_to_vault(store, vault)
+    assert user_page.is_file()
+    assert user_claim.is_file()
+    assert "my-note" not in result.pages_removed
+    assert "scratch" not in result.claims_removed
+
+
 def test_kb_to_vault_is_idempotent(store: KBStore, vault: Path) -> None:
     kb_to_vault(store, vault)
     first = (vault / VAULT_DIR / "pages" / "alpha-page.md").read_text(encoding="utf-8")
