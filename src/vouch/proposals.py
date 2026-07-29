@@ -656,6 +656,61 @@ def auto_approve_receipts(
     return approved
 
 
+def auto_approve_pending(
+    store: KBStore, *, actor: str | None = None
+) -> list[Claim | Page | Entity | Relation]:
+    """Approve every pending proposal the configured gate allows.
+
+    The full drain behind auto-approval-by-default. Under
+    ``review.approver_role: trusted-agent`` every pending proposal
+    self-approves through the normal ``approve()`` path — one audit event
+    per artifact, never a parallel write path. Claims go through
+    ``resolve_pending_receipt_claim`` so duplicates of durable claims are
+    closed instead of piling up; pages, entities and relations are approved
+    unless something still blocks them. What stays pending is exactly the
+    human-call residue: protected page kinds, pages with dead claim
+    references, an id already durable with different content, and DELETE
+    proposals (retracting durable knowledge is never drained mechanically).
+
+    Without trusted-agent this falls back to the receipt drain
+    (``auto_approve_receipts``), which is itself a no-op when
+    ``review.auto_approve_on_receipt`` is off — the review gate is honoured,
+    never silently bypassed.
+    """
+    review_cfg = _review_config(store)
+    if review_cfg.get("approver_role") != "trusted-agent":
+        return list(auto_approve_receipts(store, actor=actor))
+    approved: list[Claim | Page | Entity | Relation] = []
+    for proposal in store.list_proposals(ProposalStatus.PENDING):
+        if proposal.kind == ProposalKind.DELETE:
+            continue
+        if proposal.kind == ProposalKind.CLAIM:
+            claim = resolve_pending_receipt_claim(
+                store, proposal,
+                actor=actor or proposal.proposed_by,
+                reason="trusted-agent — auto-approved",
+            )
+            if claim is not None:
+                approved.append(claim)
+            continue
+        approver = actor or proposal.proposed_by
+        if check_approvable(store, proposal.id, approved_by=approver) is not None:
+            continue
+        try:
+            approved.append(
+                approve(
+                    store, proposal.id, approved_by=approver,
+                    reason="trusted-agent — auto-approved",
+                )
+            )
+        except ProposalError:
+            # check_approvable is a dry-run; the write itself can still fail
+            # (e.g. a claim ref deleted between check and approve). Left
+            # pending for a human, the drain survives.
+            continue
+    return approved
+
+
 def _payload_block_reason(store: KBStore, proposal: Proposal) -> str | None:
     """Dry-run the put_*-side ref guards, return reason string or None.
 
