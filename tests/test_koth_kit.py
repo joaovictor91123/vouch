@@ -64,3 +64,52 @@ def test_bool_is_not_accepted_as_a_number() -> None:
 def test_oversized_kit_is_rejected() -> None:
     big = "retrieval:\n  backend: auto\n" + ("# pad\n" * 2000)
     assert any("larger than" in e for e in validate(big))
+
+
+def test_strategy_params_kit_validates() -> None:
+    # the data lane for ranking: champion-family knobs are legal kit surface.
+    kit = (
+        "retrieval:\n"
+        "  backend: auto\n"
+        "  strategy_params:\n"
+        "    suspect_penalty: 3.5\n"
+        "    danger_scale: 6.0\n"
+        "    conflict_collapse: false\n"
+    )
+    assert validate(kit) == []
+
+
+def test_strategy_params_out_of_bounds_is_rejected() -> None:
+    errors = validate(
+        "retrieval:\n  strategy_params:\n    score_weight: 1.5\n"
+    )
+    assert any("strategy_params.score_weight" in e for e in errors)
+
+
+def test_strategy_params_unknown_knob_is_rejected() -> None:
+    # extra=forbid in the schema keeps the closed world closed through
+    # the delegated subtree.
+    errors = validate(
+        "retrieval:\n  strategy_params:\n    eval_hook: 'evil'\n"
+    )
+    assert errors != []
+
+
+def test_strategy_params_bool_is_not_a_number() -> None:
+    errors = validate(
+        "retrieval:\n  strategy_params:\n    danger_scale: true\n"
+    )
+    assert errors != []
+
+
+def test_strategy_params_must_be_a_mapping() -> None:
+    errors = validate("retrieval:\n  strategy_params: [1, 2]\n")
+    assert any("expected a mapping" in e for e in errors)
+
+
+def test_dotted_strategy_key_is_rejected() -> None:
+    # naming code to import is not data; only strategy_params is kit surface.
+    errors = validate(
+        "retrieval:\n  strategy: vouch.strategies.provenance\n"
+    )
+    assert any("not in allowlist" in e for e in errors)

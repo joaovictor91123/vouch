@@ -22,7 +22,13 @@ import yaml
 from . import graph, hot_memory, index_db, retrieval_events
 from . import strategy as strategy_mod
 from .embeddings.fusion import rrf_fuse
-from .models import ClaimStatus, ContextItem, ContextPack, ContextQuality
+from .models import (
+    ClaimStatus,
+    ContextItem,
+    ContextPack,
+    ContextQuality,
+    PageStatus,
+)
 from .scoping import (
     ViewerContext,
     filter_hits,
@@ -50,6 +56,12 @@ ContextItemKind = Literal["claim", "page", "entity", "relation", "source"]
 # just order) is in its hands. Factor/floor keep the pool a shortlist.
 _STRATEGY_POOL_FACTOR = 5
 _STRATEGY_POOL_MIN = 50
+
+# same sizing for kb.search lifecycle filtering: backends cap before status
+# filtering, so without over-fetch a window full of retracted hits under-fills
+# the requested limit (#581 / coderabbit).
+_LIFECYCLE_POOL_FACTOR = _STRATEGY_POOL_FACTOR
+_LIFECYCLE_POOL_MIN = _STRATEGY_POOL_MIN
 
 _VALID_BACKENDS = ("auto", "hybrid", "embedding", "fts5", "substring")
 _RERANKER_CACHE: Any | None = None
@@ -315,20 +327,32 @@ def _maybe_rerank(
     return ordered + hits[window_size:]
 
 
-def _configured_strategy(store: KBStore) -> str | None:
-    """Resolve ``retrieval.strategy`` - a dotted import path to a shipped,
-    human-merged strategy - from config.yaml. Off (None) by default."""
+def _retrieval_config(store: KBStore) -> dict[str, Any]:
+    """The ``retrieval`` mapping from config.yaml ({} when absent/broken)."""
     try:
         loaded = yaml.safe_load(store.config_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
-        return None
+        return {}
     if not isinstance(loaded, dict):
-        return None
+        return {}
     retrieval = loaded.get("retrieval")
-    if not isinstance(retrieval, dict):
-        return None
-    dotted = retrieval.get("strategy")
+    return retrieval if isinstance(retrieval, dict) else {}
+
+
+def _configured_strategy(store: KBStore) -> str | None:
+    """Resolve ``retrieval.strategy`` - a dotted import path to a shipped,
+    human-merged strategy - from config.yaml. Off (None) by default."""
+    dotted = _retrieval_config(store).get("strategy")
     return dotted if isinstance(dotted, str) and dotted else None
+
+
+def _configured_strategy_params(store: KBStore) -> dict[str, Any] | None:
+    """Resolve ``retrieval.strategy_params`` - the champion family's knobs
+    as bounded data (see ``vouch.strategies.configured``). This is the kit
+    lane's hook into ranking: pure config, validated against one schema by
+    both the koth gate and this runtime path."""
+    params = _retrieval_config(store).get("strategy_params")
+    return params if isinstance(params, dict) else None
 
 
 def _maybe_strategy(
@@ -350,13 +374,26 @@ def _maybe_strategy(
     """
     strat = strategy
     if strat is None:
-        dotted = _configured_strategy(store)
-        if not dotted:
-            return hits
-        try:
-            strat = strategy_mod.load_dotted(dotted)
-        except Exception:
-            return hits
+        # data before code: bounded params are the lane that iterates
+        # without a human, so when both hooks are set the params arm is
+        # the deliberate experiment. invalid params mean "no strategy",
+        # never a broken retrieval.
+        params = _configured_strategy_params(store)
+        if params is not None:
+            from .strategies import configured
+
+            try:
+                strat = configured.build(params)
+            except Exception:
+                return hits
+        else:
+            dotted = _configured_strategy(store)
+            if not dotted:
+                return hits
+            try:
+                strat = strategy_mod.load_dotted(dotted)
+            except Exception:
+                return hits
     if not hits:
         return hits
     # the strategy addresses hits by id; if two hits somehow share one (a
@@ -469,6 +506,11 @@ def search_kb(
         agent=agent,
     )
     fetch_limit = scoped_fetch_limit(limit, viewer)
+    # over-fetch before lifecycle filtering so retracted/archived hits that
+    # consume the backend window can be replaced by later live candidates.
+    candidate_limit = max(
+        fetch_limit * _LIFECYCLE_POOL_FACTOR, _LIFECYCLE_POOL_MIN,
+    )
     hits: list[tuple[str, str, str, float]] = []
     used = backend_arg
 
@@ -481,13 +523,13 @@ def search_kb(
 
     if backend_arg in ("auto", "hybrid"):
         emb = index_db.search_semantic(
-            store.kb_dir, query, limit=fetch_limit * 2, min_score=min_score,
+            store.kb_dir, query, limit=candidate_limit * 2, min_score=min_score,
         )
         try:
-            fts = index_db.search(store.kb_dir, query, limit=fetch_limit * 2)
+            fts = index_db.search(store.kb_dir, query, limit=candidate_limit * 2)
         except sqlite3.Error:
             fts = []
-        hits = rrf_fuse(emb, fts, limit=fetch_limit)
+        hits = rrf_fuse(emb, fts, limit=candidate_limit)
         if emb and fts:
             used = "hybrid"
         elif emb:
@@ -495,28 +537,31 @@ def search_kb(
         elif fts:
             used = "fts5"
         if not hits and backend_arg == "auto":
-            hits = store.search_substring(query, limit=fetch_limit)
+            hits = store.search_substring(query, limit=candidate_limit)
             used = "substring"
     elif backend_arg == "embedding":
         hits = index_db.search_semantic(
-            store.kb_dir, query, limit=fetch_limit, min_score=min_score,
+            store.kb_dir, query, limit=candidate_limit, min_score=min_score,
         )
         used = "embedding"
     elif backend_arg == "fts5":
         try:
-            hits = index_db.search(store.kb_dir, query, limit=fetch_limit)
+            hits = index_db.search(store.kb_dir, query, limit=candidate_limit)
         except sqlite3.Error:
             hits = []
         used = "fts5"
     else:  # substring
-        hits = store.search_substring(query, limit=fetch_limit)
+        hits = store.search_substring(query, limit=candidate_limit)
         used = "substring"
 
     semantic_ok = index_db.semantic_search_available()
-    scoped = filter_hits(store, hits, viewer, limit=limit)
+    # scope first without a limit so status filtering can refill the window —
+    # otherwise a page of retracted hits would leave search under-filled.
+    scoped = filter_hits(store, hits, viewer, limit=None)
+    live = _filter_live_hits(store, scoped, limit=limit)
     hits_list = [
         {"kind": k, "id": i, "snippet": sn, "score": sc, "backend": used}
-        for k, i, sn, sc in scoped
+        for k, i, sn, sc in live
     ]
     result: dict[str, Any] = {
         "backend": used,
@@ -539,6 +584,40 @@ def search_kb(
         result, store, query=query,
         exclude_ids=[str(hit["id"]) for hit in hits_list],
     )
+
+
+def _filter_live_hits(
+    store: KBStore,
+    hits: list[tuple[str, str, str, float]],
+    *,
+    limit: int | None = None,
+) -> list[tuple[str, str, str, float]]:
+    """Drop retracted claims and archived pages from search hits.
+
+    ``kb.context`` already applies ``_RETRACTED_CLAIM_STATUSES``; ``kb.search``
+    must do the same or archive/supersede/redact become decorative on the
+    surface agents use for detail after recall (#581).
+    """
+    kept: list[tuple[str, str, str, float]] = []
+    for kind, artifact_id, summary, score in hits:
+        if kind == "claim":
+            try:
+                claim = store.get_claim(artifact_id)
+            except ArtifactNotFoundError:
+                continue
+            if claim.status in _RETRACTED_CLAIM_STATUSES:
+                continue
+        elif kind == "page":
+            try:
+                page = store.get_page(artifact_id)
+            except ArtifactNotFoundError:
+                continue
+            if page.status is PageStatus.ARCHIVED:
+                continue
+        kept.append((kind, artifact_id, summary, score))
+        if limit is not None and len(kept) >= limit:
+            break
+    return kept
 
 
 def _enrich_summary(store: KBStore, kind: str, artifact_id: str, summary: str) -> str:
