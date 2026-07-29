@@ -7,13 +7,16 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
+  `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
+  longer raises `AttributeError` while building the docker command.
 - **`kb.session_transcript`'s degraded-path test no longer depends on an
   ambient KB**: it called `handle_request` against whatever `.vouch/` the
   cwd happened to sit under, so it passed on a developer checkout and
   failed in CI — where `.vouch/` is gitignored — with an `internal_error`
-  from `_store()`. it now builds its own KB under `tmp_path` and points
-  both transcript locators at empty dirs, so the absence it asserts is
-  the raw transcript's.
+  from `_store()`. it now chdirs into a fixture KB and points both
+  transcript locators at empty dirs, so the absence it asserts is the
+  raw transcript's.
 - **`kb.search` excludes retracted claims and archived pages** (#581):
   `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
   `ARCHIVED` pages the same way `kb.context` already does, so lifecycle

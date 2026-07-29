@@ -102,6 +102,34 @@ core either — they submit kits that a validator scores. same boundary,
 expressed as a path allowlist and a branch boundary instead of a tarball
 contract.
 
+## strategy_params — the champion family as kit surface
+
+the largest instance of that division: the reigning engine-lane
+champion's decision points are exposed as bounded data under
+`retrieval.strategy_params` (schema in
+`src/vouch/strategies/configured.py`, defaults = the promoted champion's
+exact constants). a kit can tune the suspect penalties, the
+relevance-scaled danger factor, the update boosts, the conflict-collapse
+threshold, or switch whole rules off:
+
+```yaml
+retrieval:
+  backend: auto
+  strategy_params:
+    suspect_penalty: 3.5
+    danger_scale: 6.0
+    conflict_collapse: false
+```
+
+the kit validator delegates this subtree to the same pydantic schema the
+runtime builds the strategy from — one schema, two callers, so the gate
+and the engine cannot disagree about what a legal kit is. unknown keys
+and out-of-bounds values reject the kit before scoring; the dotted code
+hook (`retrieval.strategy`) is deliberately NOT kit surface, because
+naming code to import is not data. a winning strategy *idea* still
+enters through the human-reviewed engine lane once; every configuration
+of it thereafter competes — and auto-merges — as data.
+
 ## anti-cheat, mapped from ditto
 
 | threat | ditto's answer | the ladder's answer |

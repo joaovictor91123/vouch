@@ -51,6 +51,29 @@ BOUNDS: dict[tuple[str, ...], Any] = {
 
 ALLOWED_BRANCHES = {path[:i] for path in BOUNDS for i in range(1, len(path))}
 
+# The champion-family knobs (retrieval.strategy_params) are validated by the
+# same pydantic schema the runtime builds the strategy from — one schema, two
+# callers, so the gate and the engine can never disagree about a legal kit.
+# The subtree stays data-only: the schema forbids unknown keys and bounds
+# every value, and the dotted code hook (retrieval.strategy) is deliberately
+# NOT in the allowlist — naming code to import is not data.
+STRATEGY_PARAMS = ("retrieval", "strategy_params")
+
+
+def _validate_strategy_params(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return ["retrieval.strategy_params: expected a mapping"]
+    try:
+        from vouch.strategies.configured import validate_params
+    except ImportError:
+        # fail closed: a kit touching strategy_params cannot be judged
+        # without the schema, and "cannot judge" must never mean "pass".
+        return [
+            "retrieval.strategy_params: the vouch package is required to "
+            "validate this section (pip install -e .)"
+        ]
+    return [f"retrieval.strategy_params.{err}" for err in validate_params(value)]
+
 
 def _walk(node: Any, path: tuple[str, ...], errors: list[str]) -> None:
     if isinstance(node, dict):
@@ -59,7 +82,9 @@ def _walk(node: Any, path: tuple[str, ...], errors: list[str]) -> None:
                 errors.append(f"non-string key at {'.'.join(path) or '<root>'}")
                 continue
             child = (*path, key)
-            if child in BOUNDS:
+            if child == STRATEGY_PARAMS:
+                errors.extend(_validate_strategy_params(value))
+            elif child in BOUNDS:
                 if not BOUNDS[child](value):
                     errors.append(f"{'.'.join(child)}: value {value!r} out of bounds")
             elif child in ALLOWED_BRANCHES:
