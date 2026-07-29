@@ -327,20 +327,32 @@ def _maybe_rerank(
     return ordered + hits[window_size:]
 
 
-def _configured_strategy(store: KBStore) -> str | None:
-    """Resolve ``retrieval.strategy`` - a dotted import path to a shipped,
-    human-merged strategy - from config.yaml. Off (None) by default."""
+def _retrieval_config(store: KBStore) -> dict[str, Any]:
+    """The ``retrieval`` mapping from config.yaml ({} when absent/broken)."""
     try:
         loaded = yaml.safe_load(store.config_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
-        return None
+        return {}
     if not isinstance(loaded, dict):
-        return None
+        return {}
     retrieval = loaded.get("retrieval")
-    if not isinstance(retrieval, dict):
-        return None
-    dotted = retrieval.get("strategy")
+    return retrieval if isinstance(retrieval, dict) else {}
+
+
+def _configured_strategy(store: KBStore) -> str | None:
+    """Resolve ``retrieval.strategy`` - a dotted import path to a shipped,
+    human-merged strategy - from config.yaml. Off (None) by default."""
+    dotted = _retrieval_config(store).get("strategy")
     return dotted if isinstance(dotted, str) and dotted else None
+
+
+def _configured_strategy_params(store: KBStore) -> dict[str, Any] | None:
+    """Resolve ``retrieval.strategy_params`` - the champion family's knobs
+    as bounded data (see ``vouch.strategies.configured``). This is the kit
+    lane's hook into ranking: pure config, validated against one schema by
+    both the koth gate and this runtime path."""
+    params = _retrieval_config(store).get("strategy_params")
+    return params if isinstance(params, dict) else None
 
 
 def _maybe_strategy(
@@ -362,13 +374,26 @@ def _maybe_strategy(
     """
     strat = strategy
     if strat is None:
-        dotted = _configured_strategy(store)
-        if not dotted:
-            return hits
-        try:
-            strat = strategy_mod.load_dotted(dotted)
-        except Exception:
-            return hits
+        # data before code: bounded params are the lane that iterates
+        # without a human, so when both hooks are set the params arm is
+        # the deliberate experiment. invalid params mean "no strategy",
+        # never a broken retrieval.
+        params = _configured_strategy_params(store)
+        if params is not None:
+            from .strategies import configured
+
+            try:
+                strat = configured.build(params)
+            except Exception:
+                return hits
+        else:
+            dotted = _configured_strategy(store)
+            if not dotted:
+                return hits
+            try:
+                strat = strategy_mod.load_dotted(dotted)
+            except Exception:
+                return hits
     if not hits:
         return hits
     # the strategy addresses hits by id; if two hits somehow share one (a
