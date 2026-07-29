@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from vouch import http_server
 from vouch.http_server import _VouchHTTPServer, make_server, run_http
 from vouch.models import Claim, ProposalStatus
 from vouch.storage import KBStore
@@ -231,3 +232,47 @@ def test_negative_content_length_rejected(base_url: str) -> None:
         return
     status_line = response.partition(b"\r\n")[0]
     assert b" 4" in status_line, status_line
+
+
+# --- event loop stays responsive ------------------------------------------
+
+
+def test_slow_rpc_does_not_block_other_requests(
+    kb: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow kb.* call must not stall every other request on the server.
+
+    ``handle_request`` is synchronous and CPU/IO-bound — on a real KB a
+    ``kb.status`` can run for seconds. Dispatched inline from the async
+    endpoint it blocks the event loop, so liveness probes and every other
+    in-flight request queue behind it and the console reports the endpoint
+    as unreachable. It has to run off the loop.
+    """
+    import time
+
+    real = http_server.jsonl_server.handle_request
+
+    def slow(envelope: dict) -> dict:
+        time.sleep(1.0)
+        return real(envelope)
+
+    monkeypatch.setattr(http_server.jsonl_server, "handle_request", slow)
+
+    gen = _serve(make_server("127.0.0.1", 0))
+    url = next(gen)
+    try:
+        rpc = threading.Thread(
+            target=_post, args=(url, {"id": "slow", "method": "kb.status"}), daemon=True
+        )
+        rpc.start()
+        time.sleep(0.2)  # let the slow call reach the handler
+        start = time.monotonic()
+        code, body = _get(url, "/health")
+        elapsed = time.monotonic() - start
+        rpc.join(timeout=10)
+    finally:
+        with pytest.raises(StopIteration):
+            next(gen)
+
+    assert code == 200 and body == {"ok": True}
+    assert elapsed < 0.5, f"/health waited {elapsed:.2f}s behind the slow rpc call"
