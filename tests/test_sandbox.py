@@ -54,8 +54,11 @@ def test_docker_agent_runner_wraps_agent_with_worktree_and_home_mounts(
         argv = fr.calls[0]
         assert argv[:3] == ["docker", "run", "--rm"]
         assert "--entrypoint" in argv and "" in argv
-        assert "--user" in argv
-        assert f"{os.getuid()}:{os.getgid()}" in argv
+        if hasattr(os, "getuid") and hasattr(os, "getgid"):
+            assert "--user" in argv
+            assert f"{os.getuid()}:{os.getgid()}" in argv
+        else:
+            assert "--user" not in argv
         assert "-w" in argv and str(worktree.resolve()) in argv
         assert "-e" in argv
         assert f"HOME={sandbox.CONTAINER_HOME}" in argv
@@ -68,6 +71,29 @@ def test_docker_agent_runner_wraps_agent_with_worktree_and_home_mounts(
         )
         assert "agent-img" in argv
         assert argv[-3:] == ["codex", "exec", "fix"]
+    finally:
+        runner.close()
+
+
+def test_docker_argv_omits_user_when_getuid_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for #582: Windows has no os.getuid; argv must still build."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.delattr(sandbox.os, "getuid", raising=False)
+    monkeypatch.delattr(sandbox.os, "getgid", raising=False)
+
+    fr = FakeRunner()
+    runner = sandbox.DockerAgentRunner(
+        repo_root=repo, runner=fr, image="agent-img", host_home=tmp_path,
+    )
+    try:
+        runner.run(["claude", "-p", "hi"], cwd=str(repo))
+        argv = fr.calls[0]
+        assert argv[:3] == ["docker", "run", "--rm"]
+        assert "--user" not in argv
+        assert "agent-img" in argv
     finally:
         runner.close()
 

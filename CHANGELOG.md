@@ -7,9 +7,12 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
-- **`kb.search` excludes retracted claims and archived pages** (#581):
-  `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
-  `ARCHIVED` pages the same way `kb.context` already does, so lifecycle
+- **sandbox docker argv on Windows** (#582): omit --user uid:gid when
+  os.getuid / os.getgid are unavailable so sandboxed dual-solve no
+  longer raises AttributeError while building the docker command.
+- **kb.search excludes retracted claims and archived pages** (#581):
+  search_kb now drops ARCHIVED / SUPERSEDED / REDACTED claims and
+  ARCHIVED pages the same way kb.context already does, so lifecycle
   controls are not decorative on the detail-search surface. backends
   over-fetch a candidate pool before that filter so retracted top-hits
   cannot starve the requested result limit.
@@ -21,16 +24,19 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
-- **auto approval is the default** (`review.approver_role: trusted-agent`
+- **auto approval is the default** (
+eview.approver_role: trusted-agent
   in the starter config): a fresh KB approves the capturing agent's
   proposals with no human step. nothing bypasses the gate — every write
-  still flows through `proposals.approve()` with one audit event and the
-  `auto_approved` stamp; the new `proposals.auto_approve_pending` drain
+  still flows through proposals.approve() with one audit event and the
+  uto_approved stamp; the new proposals.auto_approve_pending drain
   (run from capture finalize) clears claims, pages, entities and
   relations, rejects duplicates, and still holds protected page kinds,
   dead-reference pages, id conflicts and delete proposals for a
-  reviewer. remove `approver_role` from `config.yaml` to put writes back
-  behind `vouch review`.
+  reviewer. remove pprover_role from config.yaml to put writes back
+  behind ouch review.
+
+)
 
 ### Added
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
