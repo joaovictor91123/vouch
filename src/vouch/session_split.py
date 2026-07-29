@@ -19,8 +19,9 @@ from typing import Any
 import yaml
 
 from . import audit as audit_mod
-from . import capture, llm_draft
+from . import capture, enrich, llm_draft
 from . import compile as compile_mod
+from .config_coerce import coerce_bool
 from .llm_draft import LLMDraftError
 from .models import ProposalStatus
 from .proposals import _slugify, propose_page, reject
@@ -71,7 +72,7 @@ def load_split_config(store: KBStore) -> SplitConfig:
         return SplitConfig()
     llm_cmd = raw.get("llm_cmd")
     return SplitConfig(
-        enabled=bool(raw.get("enabled", True)),
+        enabled=coerce_bool(raw.get("enabled", True), True),
         llm_cmd=str(llm_cmd) if llm_cmd else None,
         threshold_observations=_coerce(
             raw.get("threshold_observations", DEFAULT_THRESHOLD_OBSERVATIONS),
@@ -96,6 +97,8 @@ def summarize(
     generated_at: str | None = None,
     mode: str = "auto",
     config: capture.CaptureConfig | None = None,
+    origin: Path | None = None,
+    sources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Roll a session buffer into PENDING page proposals. Never approves.
 
@@ -103,6 +106,15 @@ def summarize(
     (force the single rollup). The buffer is deleted only after a page is
     filed (or an explicit below-min skip), so a crash mid-run leaves it intact
     for the next `finalize-all` sweep to retry.
+
+    `origin` marks a personal-KB fallback rollup — the session ran in a folder
+    with no project KB. It is recorded on the filed page(s) so a summary of
+    work done in folder X is identifiable as such in the shared personal KB,
+    the same way `capture_answer` stamps captured sources.
+
+    `sources` are source ids the mechanical page cites (the session-answers
+    source `capture.finalize` registers). A cited session page clears the
+    admission gate's uncited-diary rule on its own merits.
     """
     cfg = config or capture.load_config(store)
     path = capture.buffer_path(store, session_id)
@@ -141,7 +153,7 @@ def summarize(
         try:
             ids, dropped, truncated = _propose_split(
                 store, session_id, observations, changed_files, git_stat,
-                intent=intent, split_cfg=split_cfg,
+                intent=intent, split_cfg=split_cfg, origin=origin,
             )
             if ids:
                 if path.exists():
@@ -160,9 +172,19 @@ def summarize(
                 "session_split: llm split failed for %s (%s); falling back", session_id, e
             )
 
+    # Semantic enrichment (dream-style subject extraction) decorates the
+    # mechanical page. Skipped on the split-failure fallback path: the LLM
+    # already failed once this run — don't stack a second call on top.
+    enrichment = None
+    if not (mode != "mechanical" and want_split):
+        enrichment = enrich.enrich_session(
+            store, session_id, observations, changed_files, git_stat,
+            intent=intent,
+        )
     pid = _propose_mechanical(
         store, session_id, observations, changed_files, git_stat,
         project=project, generated_at=generated_at, intent=intent,
+        origin=origin, enrichment=enrichment, sources=sources,
     )
     if path.exists():
         path.unlink()
@@ -171,8 +193,15 @@ def summarize(
         "captured": total, "summary_proposal_id": pid,
         "summary_proposal_ids": [pid], "mode": final_mode,
         "session_id": session_id, "summarized": final_mode == "mechanical",
-        "proposal_id": pid,
+        "proposal_id": pid, "enriched": enrichment is not None,
     }
+    if enrichment is not None and enrichment.updates:
+        # Detected value changes ride back to capture.finalize, which owns
+        # supersession (it knows the gate state and the filed claims).
+        result["updates"] = [
+            {"attribute": u.attribute, "old": u.old, "new": u.new}
+            for u in enrichment.updates
+        ]
     if final_mode == "fallback":
         # the LLM was attempted and fell back; the mechanical page is a backstop,
         # but surface the failure so the UI can prompt a retry / config fix.
@@ -190,20 +219,46 @@ def _propose_mechanical(
     project: str | None,
     generated_at: str | None,
     intent: str | None,
+    origin: Path | None = None,
+    enrichment: enrich.Enrichment | None = None,
+    sources: list[str] | None = None,
 ) -> str:
     """File the single mechanical rollup page, exactly as capture did before."""
     title, body = capture.build_summary_body(
         session_id, observations, changed_files, git_stat,
         project=project, generated_at=generated_at, first_prompt=intent,
+        enrichment=enrichment,
     )
+    tags = (_origin_tags(origin) or []) + enrich.subject_tags(enrichment)
+    metadata = _origin_metadata(session_id, origin)
+    if enrichment is not None:
+        if enrichment.summary:
+            metadata["enrich_summary"] = enrichment.summary
+        subjects = enrich.subjects_metadata(enrichment)
+        if subjects:
+            metadata["subjects"] = subjects
     proposal = propose_page(
         store, title=title, body=body,
         page_type=capture.CAPTURE_PAGE_TYPE,
         proposed_by=capture.CAPTURE_ACTOR,
         session_id=session_id,
+        source_ids=sources or None,
+        tags=tags or None,
+        metadata=metadata,
         rationale="auto-captured session summary",
     )
     return proposal.id
+
+
+def _origin_tags(origin: Path | None) -> list[str] | None:
+    return ["personal-fallback"] if origin is not None else None
+
+
+def _origin_metadata(session_id: str, origin: Path | None) -> dict[str, Any]:
+    meta: dict[str, Any] = {"session_id": session_id}
+    if origin is not None:
+        meta["origin_path"] = str(origin)
+    return meta
 
 
 def _propose_split(
@@ -215,6 +270,7 @@ def _propose_split(
     *,
     intent: str | None,
     split_cfg: SplitConfig,
+    origin: Path | None = None,
 ) -> tuple[list[str], list[dict[str, Any]], bool]:
     cmd = split_cfg.llm_cmd or compile_mod.load_config(store).llm_cmd
     if not cmd:
@@ -231,7 +287,9 @@ def _propose_split(
         label="capture.split.llm_cmd",
     )
     drafts = llm_draft.parse_drafts(raw, noun="page")
-    ids, dropped = _file_drafts(store, session_id, drafts, split_cfg.max_pages)
+    ids, dropped = _file_drafts(
+        store, session_id, drafts, split_cfg.max_pages, origin=origin
+    )
     _audit_split(store, session_id, ids, dropped, len(observations), truncated)
     return ids, dropped, truncated
 
@@ -418,6 +476,7 @@ def _file_drafts(
     session_id: str,
     drafts: list[dict[str, Any]],
     max_pages: int,
+    origin: Path | None = None,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     existing = store.list_pages()
     taken = {p.title.strip().lower() for p in existing}
@@ -444,9 +503,9 @@ def _file_drafts(
             store, title=title, body=body,
             page_type=capture.CAPTURE_PAGE_TYPE,  # "session" — forced, ignore any LLM type
             proposed_by=SPLIT_ACTOR,
-            tags=["session", "split"],
+            tags=["session", "split", *(_origin_tags(origin) or [])],
             session_id=session_id,
-            metadata={"session_id": session_id},
+            metadata=_origin_metadata(session_id, origin),
             rationale=f"llm topical split of session {session_id}",
         )
         ids.append(proposal.id)

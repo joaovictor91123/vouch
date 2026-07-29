@@ -142,6 +142,45 @@ def test_list_claims_filtered_by_status(store: KBStore) -> None:
     assert [c.id for c in stable] == ["c1"]
 
 
+def test_lint_exempts_retired_claims_from_stale_check(store: KBStore) -> None:
+    """Retired claims (archived/superseded/redacted) are terminal — they are
+    not expected to be refreshed, so lint must not flag them as stale,
+    matching metrics and digest (issue #478)."""
+    from datetime import UTC, datetime, timedelta
+
+    src = store.put_source(b"e")
+    # An archived claim 400 days old — well past the 180-day stale threshold.
+    old = datetime.now(UTC) - timedelta(days=400)
+    _write_claim_direct(store, Claim(
+        id="c1", text="t", evidence=[src.id],
+        status=ClaimStatus.ARCHIVED,
+        created_at=old,
+        updated_at=old,
+    ))
+    report = health.lint(store)
+    codes = {f.code for f in report.findings}
+    assert "stale_claim" not in codes, (
+        f"lint should not flag retired claims as stale; got: {codes}"
+    )
+
+
+def test_lint_flags_stale_active_claims(store: KBStore) -> None:
+    """Active (non-retired) claims past the stale threshold are still flagged."""
+    from datetime import UTC, datetime, timedelta
+
+    src = store.put_source(b"e")
+    old = datetime.now(UTC) - timedelta(days=400)
+    _write_claim_direct(store, Claim(
+        id="c1", text="t", evidence=[src.id],
+        status=ClaimStatus.STABLE,
+        created_at=old,
+        updated_at=old,
+    ))
+    report = health.lint(store)
+    codes = {f.code for f in report.findings}
+    assert "stale_claim" in codes
+
+
 # --- fsck ----------------------------------------------------------------
 
 
@@ -365,3 +404,27 @@ def test_fsck_without_state_db_reports_info(store: KBStore) -> None:
     assert "index_missing" in codes
     # info finding alone shouldn't fail the report.
     assert report.ok is True
+
+
+def test_receipt_coverage_fidelity_number(store: KBStore) -> None:
+    from vouch.extract import ingest_source
+    from vouch.models import Claim
+
+    assert health.receipt_coverage(store) == {
+        "live_claims": 0, "receipted": 0, "ratio": None,
+    }
+    # a receipt-backed claim (cites an Evidence record)
+    ingest_source(
+        store,
+        b"The deploy window opens every wednesday at nine in the morning.",
+        proposed_by="test",
+    )
+    cov = health.receipt_coverage(store)
+    assert cov["live_claims"] == cov["receipted"] == 1
+    assert cov["ratio"] == 1.0
+    # a plain claim citing only a source — no receipt
+    src = store.put_source(b"unquoted background material")
+    store.put_claim(Claim(id="plain", text="a plain claim", evidence=[src.id]))
+    cov = health.receipt_coverage(store)
+    assert cov == {"live_claims": 2, "receipted": 1, "ratio": 0.5}
+    assert health.status(store)["receipt_coverage"] == cov

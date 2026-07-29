@@ -21,6 +21,15 @@ from .models import Claim, ClaimStatus, Entity, Page, ProposalKind, ProposalStat
 from .storage import KBStore, _yaml_load, sha256_hex
 from .verify import verify_all
 
+# Retired claim statuses — terminal, not expected to be refreshed.
+# Mirrors the exemption in metrics.py and digest.py so lint doesn't
+# flag stale_claim on retired claims (issue #478).
+_RETIRED_CLAIM_STATUSES = frozenset({
+    ClaimStatus.SUPERSEDED,
+    ClaimStatus.ARCHIVED,
+    ClaimStatus.REDACTED,
+})
+
 
 @dataclass
 class Finding:
@@ -44,8 +53,12 @@ class HealthReport:
 
 def status(store: KBStore) -> dict[str, Any]:
     """Quick, machine-readable summary. No deep checks."""
+    identity = store.identity()
     return {
         "kb_dir": str(store.kb_dir),
+        "kb_id": identity[0] if identity else None,
+        "kb_name": identity[1] if identity else None,
+        "receipt_coverage": receipt_coverage(store),
         "claims": len(store.list_claims()),
         "pages": len(store.list_pages()),
         "sources": len(store.list_sources()),
@@ -56,6 +69,32 @@ def status(store: KBStore) -> dict[str, Any]:
         "pending_proposals": len(store.list_proposals(ProposalStatus.PENDING)),
         "audit_events": count_events(store.kb_dir),
         "index_present": (store.kb_dir / index_db.DB_FILENAME).exists(),
+    }
+
+
+def receipt_coverage(store: KBStore) -> dict[str, Any]:
+    """The fidelity number: how much of the live KB is receipt-backed.
+
+    Structural coverage only — the share of live (non-retracted) claims
+    citing at least one Evidence record (a byte-offset receipt into a stored
+    source). Byte-level verification stays in ``doctor``/``fsck``; this is
+    the cheap headline a status call can afford. The receipt gate proves a
+    quote is *real*; this number says how much of the KB carries that proof.
+    """
+    from .context import _RETRACTED_CLAIM_STATUSES
+
+    evidence_ids = {e.id for e in store.list_evidence()}
+    live = [
+        c for c in store.list_claims()
+        if c.status not in _RETRACTED_CLAIM_STATUSES
+    ]
+    receipted = sum(
+        1 for c in live if any(eid in evidence_ids for eid in c.evidence)
+    )
+    return {
+        "live_claims": len(live),
+        "receipted": receipted,
+        "ratio": round(receipted / len(live), 4) if live else None,
     }
 
 
@@ -177,19 +216,23 @@ def lint(store: KBStore, *, stale_after_days: int = 180) -> HealthReport:
                         [c.id, ref],
                     )
                 )
-        # Stale: not confirmed in N days.
-        anchor = c.last_confirmed_at or c.updated_at or c.created_at
-        if anchor and anchor.tzinfo is None:
-            anchor = anchor.replace(tzinfo=UTC)
-        if anchor and (datetime.now(UTC) - anchor) > timedelta(days=stale_after_days):
-            findings.append(
-                Finding(
-                    "warning",
-                    "stale_claim",
-                    f"claim {c.id} not confirmed in >{stale_after_days}d",
-                    [c.id],
+        # Stale: not confirmed in N days — but only for active (non-retired)
+        # claims. Retired claims (superseded/archived/redacted) are terminal
+        # and not expected to be refreshed; metrics and digest already
+        # exempt them (issue #478).
+        if c.status not in _RETIRED_CLAIM_STATUSES:
+            anchor = c.last_confirmed_at or c.updated_at or c.created_at
+            if anchor and anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=UTC)
+            if anchor and (datetime.now(UTC) - anchor) > timedelta(days=stale_after_days):
+                findings.append(
+                    Finding(
+                        "warning",
+                        "stale_claim",
+                        f"claim {c.id} not confirmed in >{stale_after_days}d",
+                        [c.id],
+                    )
                 )
-            )
         # Active claims should not be marked contested at the same time.
         if c.status == ClaimStatus.CONTESTED and not c.contradicts:
             findings.append(
