@@ -135,6 +135,21 @@ def test_exclude_ids_filters_caller_supplied(store: KBStore) -> None:
     assert b in ids
 
 
+def test_exclude_ids_still_fills_limit(store: KBStore) -> None:
+    """exclude_ids must not shrink the sidebar below ``limit`` when more
+    eligible claims remain — search/context pass hit ids here so the
+    sidebar can surface *other* hot claims."""
+    ids = [_approved_claim(store, f"claim-{i}") for i in range(8)]
+    # Exclude the three most recent; five older ones remain.
+    rows = hot_mod.compute_hot_memory(
+        store, limit=5, exclude_ids=ids[-3:],
+    )
+    got = [r["id"] for r in rows]
+    assert len(got) == 5
+    assert not set(ids[-3:]) & set(got)
+    assert set(got) <= set(ids[:-3])
+
+
 def test_cache_returns_stale_within_ttl(store: KBStore) -> None:
     _approved_claim(store, "first claim")
     rows1 = hot_mod.compute_hot_memory(store, limit=5, now=1000.0)
