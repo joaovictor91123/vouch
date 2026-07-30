@@ -21,6 +21,17 @@ All notable changes to vouch are documented here. Format follows
   `.vouch/pins.yaml`; `--local` keeps a personal set in gitignored
   `.vouch/pins.local.yaml`. `--expires` drops a pin automatically, applied on
   read so building a pack never writes.
+- **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
+  measurement-only signal ranking approved artifacts by how the sessions they
+  were surfaced into ended. Per artifact it reports good/bad session counts, an
+  associational lift against the corpus baseline, and a 95% Wilson interval.
+  Verdicts are power-gated — `useful` / `harmful` only when the interval clears
+  the baseline *and* the sample meets `--min-samples`, otherwise `unverified` /
+  `insufficient`, so an untrustworthy number never renders as a confident one.
+  Built on the existing `retrieval_events` surfacing log and the audit stream;
+  no new derived table, nothing written, and a bad verdict never expires
+  anything. `vouch eval effectiveness [--window 90d] [--min-samples N]
+  [--format text|json]`, plus MCP and JSONL.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
@@ -178,6 +189,18 @@ All notable changes to vouch are documented here. Format follows
   behind `vouch review`.
 
 ### Added
+- **bench: four derivation categories** (#617): `passive-consolidation`,
+  `multi-hop-relational`, `temporal-depth` and `aggregation`. Each asks for a
+  fact stated in no single claim, so an expected-answer substring check is
+  impossible; they are graded on a new `MemoryCase.required` — every
+  supporting part must reach the pack inside the budget. The generators draw
+  from a derived rng and their own pools, so the ten existing categories
+  produce byte-identical datasets and reproduce their recorded per-category
+  scores exactly; only the composite moves (0.58 → 0.64) because four rows
+  joined the mean. Measured on stock config: consolidation, temporal-depth and
+  aggregation at 1.00 (win condition W3 wanted > 0.5 against ditto's 0.00),
+  `multi-hop-relational` at 0.17 — the new lever, where a three-link chain
+  loses a link because no hop shares a term with the question.
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
   instructions demoted, change-of-state phrasing boosted) now ships in
