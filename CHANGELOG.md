@@ -7,6 +7,20 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **explicit pins — a working set that always enters the pack** (#615):
+  `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
+  pages lead every context pack instead of having to win the query each turn,
+  which is what `hot_memory` and `salience` cannot do — they are recency-driven
+  and decay exactly when a long task needs them not to. Capped at
+  `retrieval.pins.budget_share` (default 0.3) so pins can never starve
+  retrieval, and de-duplicated against what retrieval already found. Pins are
+  **not a gate bypass and not a permission**: they point at already-approved
+  artifacts, and lifecycle and viewer scope are re-checked on every build, so a
+  pinned claim that is later superseded/archived/redacted — or one the scope
+  filter hides — stops being injected. Shared pins live in committed
+  `.vouch/pins.yaml`; `--local` keeps a personal set in gitignored
+  `.vouch/pins.local.yaml`. `--expires` drops a pin automatically, applied on
+  read so building a pack never writes.
 - **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
   measurement-only signal ranking approved artifacts by how the sessions they
   were surfaced into ended. Per artifact it reports good/bad session counts, an
@@ -41,6 +55,41 @@ All notable changes to vouch are documented here. Format follows
   now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
   `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
   pattern, so a future status addition defaults to active.
+- **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
+  flattened `resp.headers` (case-insensitive by design) into a plain
+  `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
+  `None` whenever a hub or intermediary sent the header as `etag` rather
+  than the exact literal `ETag`. That cleared `link.last_bundle_id`,
+  permanently defeating `If-None-Match` dedup — every subsequent
+  `vouch hub pull` re-downloaded the whole bundle and re-filed every
+  claim as a fresh pending proposal, indefinitely. Header keys are now
+  lower-cased on the way into the dict, and the one consuming lookup
+  matches.
+- **kind-aware relation match in `referenced_by`** (#663):
+  relation endpoints are bare ids, so a claim↔claim edge on slug
+  `auth` also blocked deleting a page (or entity) that shared the
+  slug. the gate now resolves each endpoint to a kind (same priority
+  as `_node_exists`) and only counts the relation when it matches the
+  delete target's kind. the #600 cascade option is unchanged.
+- **security: koth strategy sandbox now blocks filesystem mutation, not
+  just `open`-writes** (#660): `_install_audit_hook` blocked `open()` in a
+  write mode, but never the separate CPython audit events `os.remove`,
+  `os.rename` (and `os.replace`), `os.mkdir`, `os.rmdir`, `os.link`,
+  `os.symlink`, `os.chmod`, `os.truncate` — so untrusted competition
+  strategy code could delete, rename, or create files/directories despite
+  the sandbox's documented claim to block "filesystem writes." Confirmed
+  end-to-end: a strategy's `rank()` could silently delete an arbitrary
+  file via `os.remove` with no error, timeout, or blocked-call signal.
+  All eight events now hit the same blocklist as `open`-writes.
+- **`kb.detect_themes` no longer leaks claim and session ids the viewer
+  cannot retrieve** (#657): the detector filtered claims on status and
+  `approved_by` but never on `ArtifactScope`, so a private or cross-project
+  claim contributed its id — and the session that produced it — to a
+  returned `ThemeCluster`. `propose_theme` writes both lists into the theme
+  page body, so the leak became committed yaml on approval rather than
+  stopping at a response. `detect_themes` now filters through
+  `scoping.is_visible` like `kb.recall` and the salience sidebar already do,
+  and takes an optional `viewer` for callers that carry one.
 - **security: empty-quote receipts no longer clear the auto-approve gate**
   (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
   guarded only on `quote is None`, not an empty string. An `Evidence` with
