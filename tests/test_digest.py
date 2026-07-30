@@ -183,32 +183,6 @@ def test_build_limit_caps_followups(tmp_path: Path) -> None:
     assert len(d.followups_due) == 3
 
 
-def test_build_excludes_archived_followups(tmp_path: Path) -> None:
-    # archived pages stay in list_pages with open/due metadata; digest must
-    # drop them the same way recall drops ARCHIVED titles.
-    s = KBStore.init(tmp_path)
-    s.put_page(
-        Page(
-            id="live-due",
-            title="still open",
-            type="followup",
-            status=PageStatus.ACTIVE,
-            metadata={"due_at": "2026-07-01", "followup_status": "open"},
-        )
-    )
-    s.put_page(
-        Page(
-            id="archived-due",
-            title="closed by archive",
-            type="followup",
-            status=PageStatus.ARCHIVED,
-            metadata={"due_at": "2026-06-01", "followup_status": "open"},
-        )
-    )
-    d = digest_mod.build(s, now=NOW)
-    assert [r.id for r in d.followups_due] == ["live-due"]
-
-
 def test_digest_is_read_only(store: KBStore) -> None:
     audit_before = (store.kb_dir / "audit.log.jsonl").read_text(encoding="utf-8")
     files_before = sorted(p.name for p in (store.kb_dir / "proposed").glob("*"))

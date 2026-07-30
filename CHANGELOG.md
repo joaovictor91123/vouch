@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **triage ignores archived twins for duplication** (#638):
+  claim/page pools used every approved artifact, so an archived claim
+  (or archived page title) with the same text forced `duplication_risk=1.0`
+  and an advisory reject on re-file. pools and embedding hits now skip
+  retracted claims and archived pages, matching search/recall/digest.
 - **`setup_repo_guards.sh` no longer requires checks that cannot report**:
   `#630` removed the `trust-gate` workflow and the coderabbit gate removed
   `coderabbit-approved`, but both contexts stayed in the script's
