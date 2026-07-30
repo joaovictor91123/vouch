@@ -20,6 +20,14 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`mask_secrets` now catches underscore-adjacent credential key names**
+  (#646): the `\b` word boundaries around the keyword alternation treat `_`
+  as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
+  and `AWS_SECRET_ACCESS_KEY=` — the dominant real-world naming shape for
+  these env-vars — passed through unmasked. switched to explicit
+  alphanumeric lookaround so underscore-delimited segments match while
+  substrings like `tokenized=` stay excluded. affects both the capture-time
+  guard and the `vouch redact` remediation backstop, which share the regex.
 - **`setup_repo_guards.sh` no longer requires checks that cannot report**:
   `#630` removed the `trust-gate` workflow and the coderabbit gate removed
   `coderabbit-approved`, but both contexts stayed in the script's
