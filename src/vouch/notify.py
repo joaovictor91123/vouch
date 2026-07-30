@@ -225,22 +225,24 @@ def sweep(store: KBStore, *, now: datetime | None = None) -> list[str]:
                 ):
                     fired.append(EVENT_CREATED)
 
-        if (
-            EVENT_BACKLOGGED in hook.events
-            and hook.backlog_threshold is not None
-            and len(pending) >= hook.backlog_threshold
-        ):
+        if EVENT_BACKLOGGED in hook.events and hook.backlog_threshold is not None:
             marker = f"{hook.url}:{hook.backlog_threshold}"
-            if marker not in state["backlogged"] and deliver(
-                hook.url,
-                _envelope(
-                    store, EVENT_BACKLOGGED,
-                    proposal_ids=pending_ids, pending_count=len(pending), now=now,
-                ),
-                secret=hook.secret,
-            ):
-                fired.append(EVENT_BACKLOGGED)
-                state["backlogged"].append(marker)
+            if len(pending) >= hook.backlog_threshold:
+                if marker not in state["backlogged"] and deliver(
+                    hook.url,
+                    _envelope(
+                        store, EVENT_BACKLOGGED,
+                        proposal_ids=pending_ids, pending_count=len(pending), now=now,
+                    ),
+                    secret=hook.secret,
+                ):
+                    fired.append(EVENT_BACKLOGGED)
+                    state["backlogged"].append(marker)
+            elif marker in state["backlogged"]:
+                # queue dropped back under threshold: re-arm so the alert can
+                # fire again on the next crossing, instead of staying latched
+                # until the queue drains all the way to zero.
+                state["backlogged"].remove(marker)
 
         if EVENT_AGED in hook.events and hook.age_threshold:
             cutoff = parse_since(hook.age_threshold, now=now)

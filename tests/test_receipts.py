@@ -98,6 +98,16 @@ def test_no_receipt_when_quote_absent() -> None:
     assert result.status is ReceiptStatus.NO_RECEIPT
 
 
+def test_no_receipt_when_quote_is_empty_string() -> None:
+    # an empty quote with a zero-length span decodes to "" and trivially
+    # equals the quote — the gate must treat this as nothing to compare,
+    # never as a verified receipt for an attacker-chosen claim.
+    ev = _ev(quote="", byte_start=0, byte_end=0)
+    result = verify_receipt(ev, SOURCE)
+    assert result.status is ReceiptStatus.NO_RECEIPT
+    assert result.verified is False
+
+
 def test_receipt_uses_byte_offsets_not_char_offsets() -> None:
     # "café — au lait": 'é' is 2 bytes (0xc3 0xa9), '—' is 3 bytes (em dash).
     # "au lait" starts at char index 7 but byte index 10. A char-offset
@@ -158,6 +168,30 @@ def test_verify_evidence_not_verified_when_source_missing(store: KBStore) -> Non
     )
     result = verify_evidence(store, ev)
     assert result.verified is False
+
+
+def test_verify_evidence_no_receipt_for_empty_quote(store: KBStore) -> None:
+    src = store.put_source(b"the quick brown fox", title="t")
+    ev = Evidence(
+        id="e4", source_id=src.id, locator="b0-0",
+        quote="", byte_start=0, byte_end=0,
+    )
+    assert verify_evidence(store, ev).status is ReceiptStatus.NO_RECEIPT
+
+
+def test_claim_gate_rejects_forged_empty_quote_receipt(store: KBStore) -> None:
+    # end-to-end: a claim citing only an empty-quote, zero-length-span
+    # Evidence must never clear the mechanical auto-approve gate, even
+    # though `source_bytes[0:0] == ""` trivially string-equals the quote.
+    src = store.put_source(b"the quick brown fox", title="t")
+    ev = store.put_evidence(
+        Evidence(
+            id="forged-empty", source_id=src.id, locator="b0-0",
+            quote="", byte_start=0, byte_end=0,
+        )
+    )
+    verdict = evaluate_claim_receipts(store, [ev.id])
+    assert verdict.approve is False
 
 
 # ---- the quote step: locate a span, or drop what cannot be quoted ----
