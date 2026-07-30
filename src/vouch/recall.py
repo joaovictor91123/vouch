@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import yaml
 
-from .config_coerce import coerce_bool
+from .config_coerce import coerce_bool, coerce_numeric
 from .context import _RETRACTED_CLAIM_STATUSES
 from .models import PageStatus
 from .scoping import ViewerContext, is_visible, viewer_from
@@ -48,7 +48,9 @@ def load_config(store: KBStore) -> RecallConfig:
         return RecallConfig()
     return RecallConfig(
         enabled=coerce_bool(raw.get("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
-        max_chars=int(raw.get("max_chars", DEFAULT_MAX_CHARS)),
+        max_chars=coerce_numeric(
+            raw.get("max_chars", DEFAULT_MAX_CHARS), DEFAULT_MAX_CHARS, int,
+        ),
     )
 
 
