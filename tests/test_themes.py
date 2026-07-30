@@ -136,6 +136,27 @@ def test_detect_themes_disabled_config(store: KBStore) -> None:
     assert result.config_used.get("enabled") is False
 
 
+def test_detect_themes_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool(\"false\") is True, so a quoted themes.enabled
+    previously silently kept theme detection on (#648)."""
+    import yaml
+
+    _seed_multi_session_claims(store)
+    store.config_path.write_text(
+        (store.config_path.read_text(encoding="utf-8") or "")
+        + '\nthemes:\n  enabled: "false"\n',
+        encoding="utf-8",
+    )
+    result = themes.detect_themes(store, min_sessions=1, min_claims=1)
+    assert len(result.clusters) == 0
+    assert result.config_used.get("enabled") is False
+    # quoted true still enables
+    cfg = yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg["themes"] = {"enabled": "true"}
+    store.config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    assert themes._load_theme_config(store)["enabled"] is True
+
+
 def test_propose_theme(store: KBStore) -> None:
     _seed_multi_session_claims(store)
     result = themes.detect_themes(store, min_sessions=2, min_claims=2)

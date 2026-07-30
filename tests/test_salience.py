@@ -53,6 +53,26 @@ def test_attach_adds_meta_when_enabled(store: KBStore) -> None:
     assert result["_meta"]["vouch_salience"][0]["entity_id"] == "jwt"
 
 
+def test_reflex_cfg_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool(\"false\") is True, so a quoted reflex.enabled
+    previously silently kept the salience reflex on (#648)."""
+    for _ in range(3):
+        salience.record_query("sess-1", "jwt")
+    enabled, _, _ = salience.reflex_cfg(
+        {"retrieval": {"reflex": {"enabled": "false"}}}
+    )
+    assert enabled is False
+    result = salience.attach_salience(
+        {}, store, "sess-1",
+        {"retrieval": {"reflex": {"enabled": "false"}}},
+    )
+    assert "vouch_salience" not in result.get("_meta", {})
+    enabled_on, _, _ = salience.reflex_cfg(
+        {"retrieval": {"reflex": {"enabled": "true"}}}
+    )
+    assert enabled_on is True
+
+
 def test_handler_attaches_salience_on_next_context_call(store: KBStore, monkeypatch) -> None:
     from vouch import jsonl_server
 

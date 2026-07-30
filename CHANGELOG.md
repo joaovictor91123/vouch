@@ -28,6 +28,19 @@ All notable changes to vouch are documented here. Format follows
   this extends the same withholding to the status gate — summaries now
   come from the post-status-filter set, matching what `kb.search` and
   `kb.context` already exclude.
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
+- **`mask_secrets` now catches underscore-adjacent credential key names**
+  (#646): the `\b` word boundaries around the keyword alternation treat `_`
+  as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
+  and `AWS_SECRET_ACCESS_KEY=` — the dominant real-world naming shape for
+  these env-vars — passed through unmasked. switched to explicit
+  alphanumeric lookaround so underscore-delimited segments match while
+  substrings like `tokenized=` stay excluded. affects both the capture-time
+  guard and the `vouch redact` remediation backstop, which share the regex.
 - **triage ignores archived twins for duplication** (#638):
   claim/page pools used every approved artifact, so an archived claim
   (or archived page title) with the same text forced `duplication_risk=1.0`

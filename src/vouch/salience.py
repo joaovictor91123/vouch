@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import index_db
+from .config_coerce import coerce_bool
 from .context import _RETRACTED_CLAIM_STATUSES
 from .storage import KBStore
 
@@ -184,8 +185,7 @@ def reflex_cfg(cfg: dict) -> tuple[bool, int, int]:
     if not isinstance(reflex, dict):
         reflex = {}
 
-    enabled = reflex.get("enabled", True)
-    enabled = bool(enabled) if isinstance(enabled, bool) else True
+    enabled = coerce_bool(reflex.get("enabled", True), True)
 
     window = reflex.get("window", DEFAULT_WINDOW)
     window = window if isinstance(window, int) and window > 0 else DEFAULT_WINDOW

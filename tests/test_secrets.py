@@ -40,6 +40,32 @@ def test_masks_key_value_assignment_but_keeps_the_key_name() -> None:
     assert "PASSWORD" in out
 
 
+def test_masks_underscore_adjacent_key_names() -> None:
+    """snake_case / SCREAMING_SNAKE_CASE is the dominant real-world shape for
+    these env-vars (.env files, shell export, docker-compose) — `\\b` treats
+    `_` as a word character, so `\\btoken\\b` never matched inside
+    `access_token`. These must mask like the bare-keyword form does."""
+    for text, secret in (
+        ("access_token=abcdefghij1234567890", "abcdefghij1234567890"),
+        ("client_secret=abcdefghij1234567890", "abcdefghij1234567890"),
+        ("DB_PASSWORD=hunter2superlongpassword", "hunter2superlongpassword"),
+        ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYabcdefg",
+         "wJalrXUtnFEMIK7MDENGbPxRfiCYabcdefg"),
+    ):
+        out = mask_secrets(text)
+        assert secret not in out, text
+        assert REDACTION in out
+        assert contains_secret(text) is True
+
+
+def test_underscore_boundary_change_has_no_new_false_positive() -> None:
+    # the keyword substring inside a longer word must still be excluded —
+    # only underscore-delimited segments should now match.
+    for text in ("tokenized=abcdefghij1234567890", "passwordless=abcdefghij1234567890"):
+        assert mask_secrets(text) == text
+        assert contains_secret(text) is False
+
+
 def test_masks_json_and_quoted_key_credentials() -> None:
     """A quoted key — JSON `"password": "..."` or quoted-YAML/py — is the most
     common structured shape a pasted credential takes, and exactly what this
