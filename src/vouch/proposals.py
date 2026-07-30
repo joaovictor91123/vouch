@@ -1274,4 +1274,7 @@ def _slugify(text: str) -> str:
             out.append("-")
             last_dash = True
     slug = "".join(out).strip("-")
-    return slug[:60] or "untitled"
+    # rstrip *after* truncating: cutting at 60 chars can land mid-word and
+    # leave a trailing dash, which makes for an ugly id and a citation that
+    # readers (and looser id matchers) trip over.
+    return slug[:60].rstrip("-") or "untitled"

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Play } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { CitedText } from '../components/CitedText'
 import { ClaimLifecycleActions } from '../components/ClaimLifecycleActions'
 import { DeleteArtifactButton } from '../components/DeleteArtifactButton'
 import { EmptyState } from '../components/EmptyState'
@@ -12,6 +13,7 @@ import type { ProjectState } from '../connection/ConnectionContext'
 import { stashStartHere } from '../lib/claude'
 import { useFanout } from '../lib/fanout'
 import { rpc } from '../lib/rpc'
+import { useOpenArtifact } from '../lib/useOpenArtifact'
 import type { Claim, WhyEdge, WhyResult } from '../lib/types'
 
 /** First session id recorded anywhere in the provenance tree. */
@@ -147,6 +149,7 @@ export function ClaimsView() {
     .flatMap((r) => r.data.map((claim) => ({ project: r.project, claim })))
     .filter((r) => r.claim.status !== 'archived')
   const selected = rows.find((r) => rowKey(r) === selectedKey) ?? null
+  const openArtifact = useOpenArtifact(selected?.project ?? null)
 
   const why = useQuery({
     queryKey: ['why', selected?.project.conn.endpoint, selected?.claim.id],
@@ -241,7 +244,9 @@ export function ClaimsView() {
               <span className="font-mono text-xs text-sepia">{selected.claim.id}</span>
             </div>
 
-            <p className="mb-6 whitespace-pre-wrap text-[15px] leading-7 text-ink">{selected.claim.text}</p>
+            <p className="mb-6 whitespace-pre-wrap text-[15px] leading-7 text-ink">
+              <CitedText text={selected.claim.text} onOpenId={openArtifact} />
+            </p>
 
             <dl className="mb-6 rounded-xl border border-rule bg-paper-2 p-5">
               <div className="flex gap-3 border-b border-rule/60 py-2 text-sm">
