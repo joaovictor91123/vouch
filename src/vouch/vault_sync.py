@@ -81,6 +81,8 @@ class VaultSyncResult:
     """
     pages_mirrored: list[str] = field(default_factory=list)
     claims_mirrored: list[str] = field(default_factory=list)
+    pages_removed: list[str] = field(default_factory=list)
+    claims_removed: list[str] = field(default_factory=list)
     pages_proposed: list[str] = field(default_factory=list)
     pages_skipped_unchanged: list[str] = field(default_factory=list)
     pages_skipped_unknown_id: list[str] = field(default_factory=list)
@@ -153,16 +155,21 @@ def _claims_dir(vault_dir: Path) -> Path:
 
 def _approved_pages(store: KBStore) -> Iterable:
     for page in store.list_pages():
-        if page.status != PageStatus.DRAFT:
-            yield page
+        # durable pages are written by the review gate (propose defaults to
+        # DRAFT). ARCHIVED is retracted — kb_to_vault deletes stale mirrors.
+        if page.status is PageStatus.ARCHIVED:
+            continue
+        yield page
 
 
 def _approved_claims(store: KBStore) -> Iterable:
     for claim in store.list_claims():
-        # Working claims have not been through the review gate; archived /
-        # superseded / redacted claims are intentionally not surfaced into the
-        # vault (Obsidian backlinks would otherwise resurrect dead knowledge).
+        # durable claims are written only after the review gate. WORKING is the
+        # normal post-approve default (#583); ACTIONABLE / STABLE / CONTESTED
+        # are later live states. retracted statuses stay out; kb_to_vault also
+        # deletes leftover mirror files for those ids.
         if claim.status in {
+            ClaimStatus.WORKING,
             ClaimStatus.ACTIONABLE,
             ClaimStatus.STABLE,
             ClaimStatus.CONTESTED,
@@ -218,7 +225,9 @@ def kb_to_vault(store: KBStore, vault_dir: Path) -> VaultSyncResult:
     Overwrites the mirror each call: the vault subdirectory is vouch's house,
     and only the KB writes there. User edits to mirrored files are picked
     up by :func:`vault_to_kb` on the next forward pass *before* this function
-    overwrites them.
+    overwrites them. Mirror files for artifacts that left the live set
+    (retracted claims, archived pages) are deleted so the vault cannot keep
+    serving dead knowledge.
     """
     result = VaultSyncResult()
     mirror = _mirror_dir(vault_dir)
@@ -226,21 +235,26 @@ def kb_to_vault(store: KBStore, vault_dir: Path) -> VaultSyncResult:
     mirror.mkdir(parents=True, exist_ok=True)
     claims_out.mkdir(parents=True, exist_ok=True)
 
+    live_pages = list(_approved_pages(store))
+    live_claims = list(_approved_claims(store))
+    live_page_ids = {p.id for p in live_pages}
+    live_claim_ids = {c.id for c in live_claims}
+
     # Build a citing-pages index up front so claim stubs can backlink in O(1).
     citers: dict[str, list[str]] = {}
-    for page in _approved_pages(store):
+    for page in live_pages:
         for cid in page.claims:
             citers.setdefault(cid, []).append(page.id)
 
     # Pages
-    for page in _approved_pages(store):
+    for page in live_pages:
         text = _serialize_page(page)
         dst = mirror / f"{page.id}.md"
         dst.write_text(text, encoding="utf-8")
         result.pages_mirrored.append(page.id)
 
     # Claim stubs
-    for claim in _approved_claims(store):
+    for claim in live_claims:
         body = _render_claim_stub(
             claim_id=claim.id,
             claim_text=claim.text,
@@ -252,15 +266,45 @@ def kb_to_vault(store: KBStore, vault_dir: Path) -> VaultSyncResult:
         dst.write_text(body, encoding="utf-8")
         result.claims_mirrored.append(claim.id)
 
-    # Refresh state file: record the hash of every mirrored file so the next
-    # forward pass can detect user edits as "current content != recorded hash".
+    # Drop previously mirrored files for artifacts that left the live set
+    # (#583). only touch paths recorded in sync state — untracked user files
+    # under vouch/pages or vouch/claims are left alone (vault_to_kb already
+    # skips them as non-edits).
+    prev_state = _load_state(vault_dir)
+    for rel in prev_state:
+        if rel.startswith("pages/"):
+            page_id = Path(rel).stem
+            if page_id in live_page_ids:
+                continue
+            path = mirror / f"{page_id}.md"
+            if path.is_file():
+                path.unlink()
+                result.pages_removed.append(page_id)
+        elif rel.startswith("claims/"):
+            claim_id = Path(rel).stem
+            if claim_id in live_claim_ids:
+                continue
+            path = claims_out / f"{claim_id}.md"
+            if path.is_file():
+                path.unlink()
+                result.claims_removed.append(claim_id)
+
+    # Refresh state for live mirrors only — do not absorb untracked user
+    # files into sync state (that would make the next forward pass treat
+    # them as editable KB pages).
     new_state: dict[str, str] = {}
-    for f in mirror.glob("*.md"):
-        rel = f"pages/{f.name}"
-        new_state[rel] = _sha256_text(f.read_text(encoding="utf-8"))
-    for f in claims_out.glob("*.md"):
-        rel = f"claims/{f.name}"
-        new_state[rel] = _sha256_text(f.read_text(encoding="utf-8"))
+    for page_id in live_page_ids:
+        f = mirror / f"{page_id}.md"
+        if f.is_file():
+            new_state[f"pages/{page_id}.md"] = _sha256_text(
+                f.read_text(encoding="utf-8")
+            )
+    for claim_id in live_claim_ids:
+        f = claims_out / f"{claim_id}.md"
+        if f.is_file():
+            new_state[f"claims/{claim_id}.md"] = _sha256_text(
+                f.read_text(encoding="utf-8")
+            )
     _save_state(vault_dir, new_state)
 
     return result
@@ -476,6 +520,8 @@ def sync_vault(
         r = kb_to_vault(store, vault_dir)
         combined.pages_mirrored.extend(r.pages_mirrored)
         combined.claims_mirrored.extend(r.claims_mirrored)
+        combined.pages_removed.extend(r.pages_removed)
+        combined.claims_removed.extend(r.claims_removed)
     return combined
 
 
