@@ -725,11 +725,17 @@ def auto_approve_pending(
     return approved
 
 
-def _payload_block_reason(store: KBStore, proposal: Proposal) -> str | None:
+def _payload_block_reason(
+    store: KBStore, proposal: Proposal, *, skip_dead_claim_refs: bool = False
+) -> str | None:
     """Dry-run the put_*-side ref guards, return reason string or None.
 
     Lets the batch precheck catch dangling refs the write side rejects
     so `vouch approve a b` stays all-or-nothing.
+
+    `skip_dead_claim_refs` omits the page→claim existence check. `approve()`
+    sets it because a dead claim ref is a reviewer decision there, handled by
+    the DeadClaimRefsError / drop_missing_claims path — not a flat block.
     """
     payload = dict(proposal.payload)
     if proposal.kind == ProposalKind.CLAIM:
@@ -762,9 +768,10 @@ def _payload_block_reason(store: KBStore, proposal: Proposal) -> str | None:
             page = Page(**payload)
         except (ValidationError, TypeError) as e:
             return f"invalid page payload: {e}"
-        for cid in page.claims:
-            if not store._claim_path(cid).exists():
-                return f"page {page.id} references unknown claim {cid}"
+        if not skip_dead_claim_refs:
+            for cid in page.claims:
+                if not store._claim_path(cid).exists():
+                    return f"page {page.id} references unknown claim {cid}"
         for eid in page.entities:
             if not store._entity_path(eid).exists():
                 return f"page {page.id} references unknown entity {eid}"
@@ -837,7 +844,7 @@ def approve(
     block = _approval_block_reason(store, proposal, approved_by)
     if block:
         raise ProposalError(block)
-    block = _payload_block_reason(store, proposal)
+    block = _payload_block_reason(store, proposal, skip_dead_claim_refs=True)
     if block:
         raise ProposalError(block)
     payload = dict(proposal.payload)
