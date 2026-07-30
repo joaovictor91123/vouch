@@ -7,6 +7,17 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
+  measurement-only signal ranking approved artifacts by how the sessions they
+  were surfaced into ended. Per artifact it reports good/bad session counts, an
+  associational lift against the corpus baseline, and a 95% Wilson interval.
+  Verdicts are power-gated — `useful` / `harmful` only when the interval clears
+  the baseline *and* the sample meets `--min-samples`, otherwise `unverified` /
+  `insufficient`, so an untrustworthy number never renders as a confident one.
+  Built on the existing `retrieval_events` surfacing log and the audit stream;
+  no new derived table, nothing written, and a bad verdict never expires
+  anything. `vouch eval effectiveness [--window 90d] [--min-samples N]
+  [--format text|json]`, plus MCP and JSONL.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
