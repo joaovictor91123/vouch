@@ -146,7 +146,7 @@ def test_build_limit_caps_sections(store: KBStore) -> None:
     assert len(d.decisions) <= 1
 
 
-def test_build_excludes_archived_followups(tmp_path: Path) -> None:
+def test_build_excludes_archived_followups_multi_page(tmp_path: Path) -> None:
     # the stale-claims loop right above the followup query skips retired
     # claims; the followup query has no status predicate, so archiving a
     # followup page left it showing up as due forever.
