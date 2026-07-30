@@ -7,6 +7,13 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **salience reflex excludes retracted claims**: `compute_salience` scanned
+  every claim regardless of status, so the `_meta.vouch_salience` sidebar
+  counted `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims in `claim_count` and
+  could name one as an entity's `top_claim_id` — pointing agents at knowledge
+  the archive/supersede/redact controls were supposed to retire. the scan now
+  applies the same lifecycle filter as the scope filter beside it. an entity
+  whose only claims are retracted still appears, reporting zero live claims.
 - **config quoted `"false"` disables enrich / events / pages_first** (#620):
   `#558` left three loaders on bare `bool()`, so a quoted `enabled: "false"`
   left `capture.enrich` and `retrieval.events` on, and turned
