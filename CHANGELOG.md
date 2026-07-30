@@ -20,6 +20,14 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.explain_ranking` no longer leaks status-filtered candidate text**
+  (#650): a retracted/superseded/redacted claim or archived page correctly
+  reported `gate: "status-filtered"`, but its `summary` was still sourced
+  from the pre-status-filter candidate set, so the full text came back
+  anyway. `#640` fixed the equivalent leak for scope-filtered candidates;
+  this extends the same withholding to the status gate — summaries now
+  come from the post-status-filter set, matching what `kb.search` and
+  `kb.context` already exclude.
 - **triage ignores archived twins for duplication** (#638):
   claim/page pools used every approved artifact, so an archived claim
   (or archived page title) with the same text forced `duplication_risk=1.0`
