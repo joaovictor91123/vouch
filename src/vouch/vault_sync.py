@@ -51,7 +51,7 @@ from .models import (
     ClaimStatus,
     PageStatus,
 )
-from .proposals import propose_page
+from .proposals import ProposalError, propose_page
 from .storage import (
     ArtifactNotFoundError,
     KBStore,
@@ -509,10 +509,20 @@ def sync_vault(
         try:
             r = vault_to_kb(store, vault_dir, actor=actor)
         except ArtifactNotFoundError as e:
-            # A vault edit referenced a claim/entity/source that no longer
-            # exists in the KB. That's a *real* conflict the user has to
+            # a vault edit referenced a claim/entity/source that no longer
+            # exists in the KB. that's a *real* conflict the user has to
             # resolve in Obsidian, not a vouch bug; surface it cleanly.
             raise VaultSyncError(f"vault edit references unknown artifact: {e}") from e
+        except ProposalError as e:
+            # propose_page converts missing claim/entity/source ids to
+            # ProposalError (ArtifactNotFoundError as __cause__), so the
+            # handler above never fired and the error escaped as a traceback
+            # past the CLI's VaultSyncError renderer. other ProposalErrors
+            # (empty title, page-kind validation) stay distinct — don't
+            # mislabel them as unknown artifacts.
+            if isinstance(e.__cause__, ArtifactNotFoundError):
+                raise VaultSyncError(f"vault edit references unknown artifact: {e}") from e
+            raise VaultSyncError(f"vault edit rejected: {e}") from e
         combined.pages_proposed.extend(r.pages_proposed)
         combined.pages_skipped_unchanged.extend(r.pages_skipped_unchanged)
         combined.pages_skipped_unknown_id.extend(r.pages_skipped_unknown_id)
