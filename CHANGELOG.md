@@ -20,6 +20,15 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.detect_themes` no longer leaks claim and session ids the viewer
+  cannot retrieve** (#657): the detector filtered claims on status and
+  `approved_by` but never on `ArtifactScope`, so a private or cross-project
+  claim contributed its id — and the session that produced it — to a
+  returned `ThemeCluster`. `propose_theme` writes both lists into the theme
+  page body, so the leak became committed yaml on approval rather than
+  stopping at a response. `detect_themes` now filters through
+  `scoping.is_visible` like `kb.recall` and the salience sidebar already do,
+  and takes an optional `viewer` for callers that carry one.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced
