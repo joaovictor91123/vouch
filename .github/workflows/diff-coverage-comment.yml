@@ -38,14 +38,16 @@ jobs:
           # trusting an api string in a `ref:` -- fail closed to the integration
           # branch if it looks like anything other than a plain branch name.
           case "$base" in
-            ''|*' '*|*'..'*|-*) base=test ;;
+            ''|*' '*|*'..'*|-*) base='test' ;;
           esac
           if ! printf '%s' "$base" | grep -qE '^[A-Za-z0-9._/-]{1,100}$'; then
-            base=test
+            base='test'
           fi
-          echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "number=$pr" >> "$GITHUB_OUTPUT"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
+          {
+            echo "found=true"
+            echo "number=$pr"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
 
       # the diff-coverage job is `needs: test`, so a run that failed at lint or
       # type-check produces no artifact. that is not a coverage verdict, so stay
