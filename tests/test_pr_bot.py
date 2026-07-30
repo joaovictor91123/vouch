@@ -27,12 +27,6 @@ def test_core_paths_all_flagged():
         assert pr_bot.classify([f])["is_core"] is True, f
 
 
-def test_trust():
-    assert pr_bot.is_trusted("OWNER", "plind-junior") is True
-    assert pr_bot.is_trusted("CONTRIBUTOR", "rando") is False
-    assert pr_bot.is_trusted("NONE", "dependabot[bot]") is True
-
-
 def test_screenshots_two_gh_images():
     body = (
         "before\n![a](https://user-images.githubusercontent.com/1/a.png)\n"
@@ -89,14 +83,6 @@ def test_cli_classify_print_klass(tmp_path):
     assert out.stdout == "ui"
 
 
-def test_cli_trust_exit_codes():
-    ok = subprocess.run([sys.executable, "-m", "vouch.pr_bot", "trust",
-                         "--author-association", "OWNER", "--actor", "plind-junior"])
-    bad = subprocess.run([sys.executable, "-m", "vouch.pr_bot", "trust",
-                          "--author-association", "NONE", "--actor", "rando"])
-    assert ok.returncode == 0 and bad.returncode == 1
-
-
 def test_extract_changed_paths_plain_file():
     files_json = '[{"filename": "src/vouch/context.py"}]'
     assert pr_bot.extract_changed_paths(files_json) == ["src/vouch/context.py"]
@@ -113,8 +99,8 @@ def test_extract_changed_paths_includes_previous_filename_on_rename():
 
 
 def test_rename_of_core_path_still_classifies_core():
-    # a rename that lands a core path under a new name must not slip past
-    # trust-gate — the pre-rename path has to stay in the classified list.
+    # a rename that lands a core path under a new name must not slip past the
+    # core gate — the pre-rename path has to stay in the classified list.
     files_json = (
         '[{"filename": "src/vouch/web_server.py", "status": "renamed", '
         '"previous_filename": "src/vouch/http_server.py"}]'
