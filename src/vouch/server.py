@@ -238,6 +238,43 @@ def kb_search(
     )
 
 
+@mcp.tool()
+def kb_explain_ranking(
+    query: str,
+    *,
+    limit: int = 10,
+    max_chars: int | None = None,
+    require_citations: bool = False,
+    project: str | None = None,
+    agent: str | None = None,
+) -> dict[str, Any]:
+    """Explain why each candidate for a query ranked where it did.
+
+    Read-only introspection over the retrieval pipeline: per candidate it
+    returns the lexical and semantic rank, the RRF contribution, a row per
+    stage (fusion, scope/status filters, recency, pages_first, rerank,
+    strategy, limit, and the optional budget/citation gates) with the rank
+    and score delta that stage caused, and the gate that kept or dropped it.
+
+    max_chars / require_citations opt into explaining kb.context's budget and
+    citation gates. project/agent set the viewer context for scope filtering,
+    the same as kb.search — nothing is exposed that the caller could not
+    already retrieve.
+    """
+    from .explain_ranking import explain_ranking
+
+    # One shared implementation across MCP / JSONL / CLI.
+    return explain_ranking(
+        _store(),
+        query=query,
+        limit=limit,
+        max_chars=max_chars,
+        require_citations=require_citations,
+        project=project,
+        agent=agent,
+    )
+
+
 def _load_cfg(store: KBStore) -> dict[str, Any]:
     try:
         loaded = yaml.safe_load((store.kb_dir / "config.yaml").read_text(encoding="utf-8"))

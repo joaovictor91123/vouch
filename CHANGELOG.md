@@ -6,6 +6,19 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`kb.explain_ranking` — why a result ranked where it did** (#432): a
+  read-only breakdown of the retrieval pipeline. Per candidate it reports the
+  lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
+  stage — fusion, scope and status filters, recency, pages-first, rerank, the
+  pluggable strategy, the limit window, and the optional budget/citation gates
+  — with the rank and score delta that stage caused, plus the gate that kept or
+  dropped it (`kept` / `scope-filtered` / `status-filtered` / `limit-dropped` /
+  `budget-dropped` / `uncited`). Registered on MCP, JSONL and the CLI
+  (`vouch explain-ranking "<query>" [--format text|json]`). Viewer-scoped
+  through the same `filter_hits` as `kb.context`, so it cannot expose an
+  artifact the caller could not already retrieve, and it touches no write path.
+
 ### Fixed
 - **vault sync mirrors post-approve WORKING/DRAFT artifacts** (#583):
   `kb_to_vault` now includes durable `WORKING` claims and `DRAFT` pages
