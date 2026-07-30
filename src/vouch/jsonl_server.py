@@ -84,6 +84,19 @@ def _store() -> KBStore:
         raise RuntimeError(str(e)) from e
 
 
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
+
+
 def _agent() -> str:
     # An authenticated bearer subject is the principal's real identity; it must
     # win over the client-supplied X-Vouch-Agent header (and VOUCH_AGENT env),
@@ -477,7 +490,7 @@ def _h_session_transcript(p: dict) -> dict:
     agent = p.get("agent")
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 def _h_propose_entity(p: dict) -> dict:
