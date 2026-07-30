@@ -47,6 +47,13 @@ All notable changes to vouch are documented here. Format follows
   `locate_span`'s existing empty-quote guard on the *mint* side). Both
   guards now reject an empty quote the same way `locate_span` already
   does, closing the gap on the *verify* side.
+- **`notify sweep`'s backlog alert re-arms after dropping below threshold**
+  (#652): the `queue.backlogged` idempotence marker was a one-way latch,
+  cleared only when the pending queue reached exactly zero — not when it
+  dropped back under `backlog_threshold`. A queue that drained partway and
+  grew again (the common shape of a real backlog) never re-alerted after
+  the first trip. The marker now clears per-hook as soon as the count
+  falls under threshold, so the next crossing fires again.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced
