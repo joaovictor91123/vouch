@@ -59,6 +59,25 @@ def test_doctor_runs_full_sweep(store: KBStore) -> None:
     assert report.ok is True
 
 
+def test_doctor_warns_on_missing_external_file(store: KBStore, tmp_path: Path) -> None:
+    """source verify marks missing externals as '!'; doctor must surface
+    them too (not only drift)."""
+    f = tmp_path / "doc.txt"
+    f.write_bytes(b"original")
+    src = store.put_source(
+        f.read_bytes(), title="doc",
+        locator=str(f.resolve()), source_type="file",
+    )
+    f.unlink()
+    report = health.doctor(store)
+    missing = [f for f in report.findings if f.code == "source_missing"]
+    assert missing, [f.code for f in report.findings]
+    assert missing[0].severity == "warning"
+    assert src.id in missing[0].object_ids
+    # warning-only — same posture as source_drift
+    assert report.ok is True
+
+
 def test_lint_surfaces_legacy_uncited_claim_yaml_without_crashing(
     store: KBStore,
 ) -> None:

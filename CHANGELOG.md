@@ -20,6 +20,12 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`verify_all` / `doctor` treat missing externals like drift** (#622):
+  `vouch source verify` already marked `external_status=missing` as `!`,
+  but `verify_all`'s audit `failed` list and `health.doctor` only looked
+  for `drift`, so a deleted upstream file could leave doctor `ok: true`
+  while the CLI failed. missing now joins the failed set and emits a
+  `source_missing` warning.
 - **salience reflex excludes retracted claims**: `compute_salience` scanned
   every claim regardless of status, so the `_meta.vouch_salience` sidebar
   counted `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims in `claim_count` and
