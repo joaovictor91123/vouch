@@ -70,6 +70,19 @@ def _store() -> KBStore:
         ) from e
 
 
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
+
+
 def _agent() -> str:
     # An authenticated bearer subject (set by the /mcp transport) is the
     # principal's real identity and must be what proposals/audit attribute to,
@@ -220,6 +233,43 @@ def kb_search(
         limit=limit,
         backend=backend,
         min_score=min_score,
+        project=project,
+        agent=agent,
+    )
+
+
+@mcp.tool()
+def kb_explain_ranking(
+    query: str,
+    *,
+    limit: int = 10,
+    max_chars: int | None = None,
+    require_citations: bool = False,
+    project: str | None = None,
+    agent: str | None = None,
+) -> dict[str, Any]:
+    """Explain why each candidate for a query ranked where it did.
+
+    Read-only introspection over the retrieval pipeline: per candidate it
+    returns the lexical and semantic rank, the RRF contribution, a row per
+    stage (fusion, scope/status filters, recency, pages_first, rerank,
+    strategy, limit, and the optional budget/citation gates) with the rank
+    and score delta that stage caused, and the gate that kept or dropped it.
+
+    max_chars / require_citations opt into explaining kb.context's budget and
+    citation gates. project/agent set the viewer context for scope filtering,
+    the same as kb.search — nothing is exposed that the caller could not
+    already retrieve.
+    """
+    from .explain_ranking import explain_ranking
+
+    # One shared implementation across MCP / JSONL / CLI.
+    return explain_ranking(
+        _store(),
+        query=query,
+        limit=limit,
+        max_chars=max_chars,
+        require_citations=require_citations,
         project=project,
         agent=agent,
     )
@@ -685,12 +735,13 @@ def kb_session_transcript(session_id: str, agent: str | None = None) -> dict[str
     Read-only. Locates the raw Claude Code / Codex file on disk and normalizes
     it into message blocks (text, thinking, tool_use with paired results).
     ``agent`` restricts the search ("claude" | "codex"); omit to try both.
-    Degrades to compact capture observations when the raw file is unavailable.
+    Degrades to compact capture observations when the raw file is unavailable,
+    and to a bare unavailable result when no KB resolves at all.
     """
     from . import transcript
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 @mcp.tool()

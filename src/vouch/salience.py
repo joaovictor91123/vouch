@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import index_db
+from .context import _RETRACTED_CLAIM_STATUSES
 from .storage import KBStore
 
 DEFAULT_WINDOW = 8
@@ -115,8 +116,10 @@ def compute_salience(
     """Rank buffered-query entity matches; return top-K salience records.
 
     Each record is ``{"entity_id", "claim_count", "top_claim_id"}`` where
-    ``claim_count`` is the number of claims referencing the entity and
-    ``top_claim_id`` is the highest-relevance claim (or None).
+    ``claim_count`` is the number of live claims referencing the entity and
+    ``top_claim_id`` is the highest-relevance live claim (or None). Retracted
+    (archived / superseded / redacted) and out-of-scope claims are excluded,
+    matching every other retrieval surface.
     """
     queries = _buffered_queries(session_id)
     if not queries:
@@ -141,11 +144,16 @@ def compute_salience(
     # Claims referencing each matched entity, by claim id (for stable picking).
     # Viewer-filtered like every other read surface: the sidebar must not
     # resurface claim ids that scope filtering hides from search/digest.
+    # Lifecycle-filtered for the same reason — a reflex that names a
+    # superseded claim as the entity's top hit makes the archive/supersede/
+    # redact controls decorative.
     from .scoping import is_visible, viewer_from
 
     viewer = viewer_from(config_path=store.config_path)
     claims_by_entity: dict[str, list[str]] = {}
     for claim in store.list_claims():
+        if claim.status in _RETRACTED_CLAIM_STATUSES:
+            continue
         if not is_visible(claim.scope, viewer):
             continue
         for eid in claim.entities:

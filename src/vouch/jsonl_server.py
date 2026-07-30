@@ -84,6 +84,19 @@ def _store() -> KBStore:
         raise RuntimeError(str(e)) from e
 
 
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
+
+
 def _agent() -> str:
     # An authenticated bearer subject is the principal's real identity; it must
     # win over the client-supplied X-Vouch-Agent header (and VOUCH_AGENT env),
@@ -153,6 +166,23 @@ def _h_search(p: dict) -> dict:
         limit=int(p.get("limit", 10)),
         backend=p.get("backend"),
         min_score=float(p.get("min_score", 0.0)),
+        project=p.get("project"),
+        agent=p.get("agent"),
+    )
+
+
+def _h_explain_ranking(p: dict) -> dict:
+    from .explain_ranking import explain_ranking
+
+    # One shared implementation across MCP / JSONL / CLI — see
+    # explain_ranking.explain_ranking. Read-only: no write path is touched.
+    max_chars = p.get("max_chars")
+    return explain_ranking(
+        _store(),
+        query=p["query"],
+        limit=int(p.get("limit", 10)),
+        max_chars=None if max_chars is None else int(max_chars),
+        require_citations=bool(p.get("require_citations", False)),
         project=p.get("project"),
         agent=p.get("agent"),
     )
@@ -477,7 +507,7 @@ def _h_session_transcript(p: dict) -> dict:
     agent = p.get("agent")
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 def _h_propose_entity(p: dict) -> dict:
@@ -881,6 +911,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.activity": _h_activity,
     "kb.digest": _h_digest,
     "kb.search": _h_search,
+    "kb.explain_ranking": _h_explain_ranking,
     "kb.neighbors": _h_neighbors,
     "kb.experts": _h_experts,
     "kb.context": _h_context,

@@ -21,6 +21,7 @@ import yaml
 
 from . import graph, hot_memory, index_db, retrieval_events
 from . import strategy as strategy_mod
+from .config_coerce import coerce_bool
 from .embeddings.fusion import rrf_fuse
 from .models import (
     ClaimStatus,
@@ -244,7 +245,7 @@ def _configured_pages_first(store: KBStore) -> tuple[bool, float]:
         boost = 1.25
     if boost <= 0:
         boost = 1.25
-    return bool(raw.get("enabled", False)), boost
+    return coerce_bool(raw.get("enabled", False), False), boost
 
 
 def _maybe_pages_first(
@@ -455,9 +456,11 @@ def _retrieve(
         if raw:
             filtered = filter_hits(store, raw, viewer, limit=limit)
             # Parity with the hybrid path: an operator who opted into
-            # recency gets it regardless of which backend serves the query.
+            # recency or rerank gets it regardless of which backend serves
+            # the query — both are configured globally, not per backend.
             filtered = _maybe_recency(store, hits=filtered)
             filtered = _maybe_pages_first(store, hits=filtered)
+            filtered = _maybe_rerank(store, query=query, hits=filtered, limit=limit)
             return [(k, i, s, sc, "embedding") for k, i, s, sc in filtered]
         return []
 
@@ -468,6 +471,7 @@ def _retrieve(
                 filtered = filter_hits(store, hits, viewer, limit=limit)
                 filtered = _maybe_recency(store, hits=filtered)
                 filtered = _maybe_pages_first(store, hits=filtered)
+                filtered = _maybe_rerank(store, query=query, hits=filtered, limit=limit)
                 return [(k, i, s, sc, "fts5") for k, i, s, sc in filtered]
         except sqlite3.Error:
             pass
@@ -586,6 +590,22 @@ def search_kb(
     )
 
 
+def _page_is_live(store: KBStore, page_id: str) -> bool:
+    """False for an archived page, or one whose yaml is gone.
+
+    Shared by ``kb.search``'s hit filter and both context-pack builders. The
+    claim half of this predicate is inlined at each call site because those
+    callers need the fetched claim anyway (citations, origin tags); pages are
+    only ever tested, so the check lives here once — keeping it in three
+    places is what let ``kb.context`` keep serving archived pages after #581
+    fixed ``kb.search``.
+    """
+    try:
+        return store.get_page(page_id).status is not PageStatus.ARCHIVED
+    except ArtifactNotFoundError:
+        return False
+
+
 def _filter_live_hits(
     store: KBStore,
     hits: list[tuple[str, str, str, float]],
@@ -607,13 +627,8 @@ def _filter_live_hits(
                 continue
             if claim.status in _RETRACTED_CLAIM_STATUSES:
                 continue
-        elif kind == "page":
-            try:
-                page = store.get_page(artifact_id)
-            except ArtifactNotFoundError:
-                continue
-            if page.status is PageStatus.ARCHIVED:
-                continue
+        elif kind == "page" and not _page_is_live(store, artifact_id):
+            continue
         kept.append((kind, artifact_id, summary, score))
         if limit is not None and len(kept) >= limit:
             break
@@ -674,6 +689,8 @@ def _append_graph_neighbors(
             if claim.status in _RETRACTED_CLAIM_STATUSES:
                 continue
             cites = list(claim.evidence)
+        elif kind == "page" and not _page_is_live(store, nid):
+            continue
         via = node.get("via", "")
         parent_score = seed_scores.get(via, 0.5)
         distance = int(node.get("distance", 1))
@@ -789,6 +806,10 @@ def build_context_pack(
                 continue
             cites = list(claim.evidence)
             origin = _origin_from_tags(claim.tags)
+        elif kind == "page" and not _page_is_live(store, hid):
+            # Archiving a page must remove it from recall, not just from
+            # kb.search — this is the surface that seeds agent context.
+            continue
         summary = _enrich_summary(store, kind, hid, summary)
         items.append(
             ContextItem(

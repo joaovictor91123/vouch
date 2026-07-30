@@ -1,7 +1,7 @@
 name: comment-command
 # slash-command trigger: the owner comments `/auto-merge` on a PR to arm
 # auto-merge, as an alternative to applying the auto-merge label. review is done
-# by CodeRabbit + ci; this only arms native auto-merge for non-core PRs.
+# by CodeRabbit + ci; arm-auto-merge.yml decides whether the PR clears the bar.
 on:
   issue_comment:
     types: [created]
@@ -22,7 +22,6 @@ jobs:
       pull-requests: write
     outputs:
       is_command: ${{ steps.cmd.outputs.is_command }}
-      klass: ${{ steps.meta.outputs.klass }}
     steps:
       - name: detect /auto-merge
         id: cmd
@@ -34,46 +33,28 @@ jobs:
           else
             echo "is_command=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        if: steps.cmd.outputs.is_command == 'true'
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: steps.cmd.outputs.is_command == 'true'
-        with:
-          python-version: "3.12"
-      - name: classify and mark authorized
-        id: meta
+      - name: mark authorized
         if: steps.cmd.outputs.is_command == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
         run: |
-          # REST files endpoint carries previous_filename on renames; the
-          # GraphQL-backed `gh pr view --json files` shortcut does not.
-          gh api "repos/$REPO/pulls/$PR/files" --paginate > files.json
-          PYTHONPATH=src python -m vouch.pr_bot changed-files --json-file files.json > changed.txt
-          klass="$(PYTHONPATH=src python -m vouch.pr_bot classify --files-file changed.txt --print-klass)"
           # mark authorized (visible, and enables deauthorize-on-push). a label
           # added via GITHUB_TOKEN does not re-trigger auto-merge.yml (GitHub's
           # token-recursion guard), so this does not double-arm.
           gh pr edit "$PR" --repo "$REPO" --add-label auto-merge || true
-          echo "klass=$klass" >> "$GITHUB_OUTPUT"
 
+  # the issue_comment payload carries no head sha; arm-auto-merge resolves it.
   arm:
     needs: parse
-    # core PRs are never armed — CODEOWNERS requires the owner's approval.
-    if: needs.parse.outputs.is_command == 'true' && needs.parse.outputs.klass != 'core'
-    runs-on: ubuntu-latest
+    if: needs.parse.outputs.is_command == 'true'
+    # a called workflow can only downgrade the caller's token, and this file
+    # starts from `permissions: {}` — so the grant has to be made here too.
     permissions:
       contents: write
       pull-requests: write
-    steps:
-      - name: arm native auto-merge (non-core)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.issue.number }}
-        run: |
-          gh pr merge "$PR" --repo "$REPO" --auto --squash
+      checks: read
+    uses: ./.github/workflows/arm-auto-merge.yml
+    with:
+      pr: ${{ github.event.issue.number }}

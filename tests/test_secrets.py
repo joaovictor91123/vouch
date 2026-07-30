@@ -40,6 +40,35 @@ def test_masks_key_value_assignment_but_keeps_the_key_name() -> None:
     assert "PASSWORD" in out
 
 
+def test_masks_json_and_quoted_key_credentials() -> None:
+    """A quoted key — JSON `"password": "..."` or quoted-YAML/py — is the most
+    common structured shape a pasted credential takes, and exactly what this
+    codebase writes (settings.json). The key's closing quote used to sit
+    between the name and the `:` and break the match, so these leaked."""
+    for text, secret in (
+        ('"password": "hunter2supersecret"', "hunter2supersecret"),
+        ("'api_key': 'swordfishalpha'", "swordfishalpha"),
+        ('"secret":"nowhitespacehere"', "nowhitespacehere"),
+    ):
+        out = mask_secrets(text)
+        assert secret not in out, text
+        assert REDACTION in out
+        assert contains_secret(text) is True
+    # the key name and its quotes stay legible
+    assert '"password":' in mask_secrets('"password": "hunter2supersecret"')
+
+
+def test_quoted_key_masking_no_false_positive() -> None:
+    """The quoted-key change must not mask a sensitive-looking word that has
+    no assignment (no separator, or a too-short value)."""
+    for text in (
+        '"password" is required for login',   # quote but no `:`/`=`
+        "password: hi",                        # value under the 6-char floor
+    ):
+        assert mask_secrets(text) == text
+        assert contains_secret(text) is False
+
+
 def test_masks_private_key_block() -> None:
     begin = f"-----BEGIN RSA {_PK}-----"
     end = f"-----END RSA {_PK}-----"
@@ -103,3 +132,32 @@ def test_cli_redact_command(tmp_path, monkeypatch) -> None:
     result = CliRunner().invoke(cli, ["redact", "c1"])
     assert result.exit_code == 0, result.output
     assert "ghp_" not in store.get_claim("c1").text
+
+
+def test_masks_json_quoted_key_credentials() -> None:
+    """JSON / quoted-key forms must not leak past the assignment mask (#549)."""
+    assert mask_secrets('"password": "hunter2secret"') == '"password": "[redacted-secret]"'
+    assert mask_secrets("'api_key': 'abcdefghij'") == "'api_key': '[redacted-secret]'"
+    assert mask_secrets('"token" : "abcdefghij"') == '"token" : "[redacted-secret]"'
+
+
+def test_masks_quoted_value_with_whitespace_and_escapes() -> None:
+    """Quoted values are whole units — whitespace must not leak a trailing token."""
+    text = '"password": "hunter2 secret"'
+    out = mask_secrets(text)
+    assert "hunter2 secret" not in out
+    assert "hunter2" not in out
+    assert out == '"password": "[redacted-secret]"'
+
+    # Value body includes escaped quotes: say \"hi\" nowxx
+    escaped = '"password": "say \\"hi\\" nowxx"'
+    assert '\\"hi\\"' in escaped
+    out2 = mask_secrets(escaped)
+    assert "nowxx" not in out2
+    assert out2 == '"password": "[redacted-secret]"'
+
+
+def test_masks_plain_assignment_still_works() -> None:
+    assert "hunter2secret" not in mask_secrets("password=hunter2secret")
+    assert "hunter2secret" not in mask_secrets("password: hunter2secret")
+    assert mask_secrets("password=hunter2secret") == "password=[redacted-secret]"

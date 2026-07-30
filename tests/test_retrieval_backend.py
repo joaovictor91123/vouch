@@ -241,6 +241,43 @@ def test_context_rerank_bool_top_k_falls_back_to_limit(
     assert [item["id"] for item in pack["items"]] == ["c3", "c2", "c1"]
 
 
+@pytest.mark.parametrize("backend", ["embedding", "fts5"])
+def test_context_rerank_applies_on_single_retriever_backends(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """retrieval.rerank is global config, so it must not be hybrid-only.
+
+    An operator pinning retrieval.backend to embedding or fts5 and enabling
+    rerank previously got no reranking at all, silently — the stage only ran
+    on the auto/hybrid branch.
+    """
+    from vouch.embeddings import rerank as rerank_mod
+
+    src = store.put_source(b"e2")
+    store.put_claim(Claim(id="c2", text="OAuth refresh flow", evidence=[src.id]))
+    health.rebuild_index(store)
+    hits = [
+        ("claim", "c1", "JWT token rotation", 0.90),
+        ("claim", "c2", "OAuth refresh flow", 0.80),
+    ]
+    monkeypatch.setattr(context.index_db, "search_semantic", lambda *a, **k: list(hits))
+    monkeypatch.setattr(context.index_db, "search", lambda *a, **k: list(hits))
+    monkeypatch.setattr(context, "_RERANKER_CACHE", None)
+    monkeypatch.setattr(rerank_mod, "default_reranker", lambda: object())
+    monkeypatch.setattr(
+        rerank_mod,
+        "rerank",
+        lambda *, query, hits, reranker, top_k: list(reversed(hits))[:top_k],
+    )
+    _set_backend(store, backend)
+    _set_rerank(store, enabled=True, top_k=2)
+
+    pack = context.build_context_pack(store, query="auth", limit=3)
+
+    assert _backends(pack) == {backend}
+    assert [item["id"] for item in pack["items"]] == ["c2", "c1"]
+
+
 def test_context_rerank_reuses_default_reranker(
     store: KBStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -528,6 +565,23 @@ def test_pages_first_disabled_keeps_order(
 
     pack = context.build_context_pack(page_claim_store, query="JWT", limit=2)
 
+    assert [item["id"] for item in pack["items"]] == ["c1", "p1"]
+
+
+def test_pages_first_quoted_false_does_not_enable(
+    page_claim_store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (#558 residual): bool(\"false\") is True, so a quoted
+    pages_first.enabled: \"false\" used to turn the boost on."""
+    _page_and_claim_fts(monkeypatch)
+    _set_backend(page_claim_store, "hybrid")
+    page_claim_store.config_path.write_text(
+        'retrieval:\n  backend: hybrid\n  pages_first:\n    enabled: "false"\n'
+        "    boost: 5.0\n",
+        encoding="utf-8",
+    )
+    assert context._configured_pages_first(page_claim_store) == (False, 5.0)
+    pack = context.build_context_pack(page_claim_store, query="JWT", limit=2)
     assert [item["id"] for item in pack["items"]] == ["c1", "p1"]
 
 
