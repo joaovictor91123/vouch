@@ -155,6 +155,14 @@ All notable changes to vouch are documented here. Format follows
   question all say so rather than calling it "this repo's" knowledge.
 
 ### Fixed
+- `sync_vault` catches the `ProposalError` that `propose_page` raises for a
+  deleted citation (missing claim/entity/source id, with
+  `ArtifactNotFoundError` as cause), not just the raw
+  `ArtifactNotFoundError`. other proposal failures (empty title, page-kind
+  validation) surface as a neutral `vault edit rejected` `VaultSyncError`
+  rather than being mislabelled as an unknown artifact. the CLI's
+  `except VaultSyncError` renderer then prints a one-line `Error:` instead
+  of an uncaught traceback (#547).
 - `clear` reads a naive `before` as utc instead of raising. a date-only
   cutoff — `2026-07-01`, the shape the cli help, the console's own error
   text, and the `kb.clear` docs all advertise — parses naive, and comparing
@@ -370,6 +378,13 @@ All notable changes to vouch are documented here. Format follows
   in config.yaml (#476).
 
 ### Fixed
+- secret masking now catches JSON/quoted-key credentials
+  (`"password": "..."`, `'api_key': '...'`). the key's closing quote sat
+  between the name and the `:` and broke the assignment regex, so the most
+  common structured secret shape — and exactly the file family vouch writes
+  (settings.json, quoted yaml) — slipped through `capture.observe` into the
+  gitignored buffer that rolls into a committed session page and the
+  append-only audit log. the value is masked and the key/quotes kept legible (#549).
 - `propose-claim`, `propose-relation`, and `propose-entity` now validate
   the payload against the Claim/Relation/Entity model at propose time
   instead of only at approve. an out-of-range `--confidence` or an
