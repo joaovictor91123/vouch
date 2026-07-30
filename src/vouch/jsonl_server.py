@@ -30,6 +30,7 @@ import yaml
 
 from . import audit, bundle, health, volunteer_context
 from . import compile as compile_mod
+from . import correction as correction_mod
 from . import digest as digest_mod
 from . import hot_memory as hot_mod
 from . import lifecycle as life
@@ -560,6 +561,16 @@ def _h_propose_delete(p: dict) -> dict:
     }
 
 
+def _h_capture_correction(p: dict) -> dict:
+    return correction_mod.capture(
+        _store(),
+        prompt=p["prompt"],
+        session_id=p.get("session_id"),
+        agent=_agent(),
+        context=p.get("context"),
+    )
+
+
 def _h_approve(p: dict) -> dict:
     a = approve(_store(), p["proposal_id"], approved_by=_agent(),
                 reason=p.get("reason"),
@@ -981,6 +992,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.session_end": _h_session_end,
     "kb.volunteer_context": _h_volunteer_context,
     "kb.crystallize": _h_crystallize,
+    "kb.capture_correction": _h_capture_correction,
     "kb.index_rebuild": _h_index_rebuild,
     "kb.lint": _h_lint,
     "kb.doctor": _h_doctor,

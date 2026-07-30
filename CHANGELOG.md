@@ -7,6 +7,26 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **correction capture — the pushback becomes a proposal** (#430): the adapter
+  captured tool *outcomes* passively but never the single highest-signal event
+  in a session, the user correcting the agent ("no, we deploy from `main` not
+  `release`"). That evaporated unless someone remembered to propose a claim
+  afterwards. `kb.capture_correction` detects pushback on the turn boundary
+  with a cheap regex heuristic — no LLM call, deterministic — and files it as a
+  **pending** claim proposal tagged `auto:correction`, wired into the existing
+  `UserPromptSubmit` hook so it needs no new plumbing. It proposes and never
+  writes: the module routes exclusively through `proposals.propose_quoted_claim`
+  and has no import of `approve` at all. The claim cites a receipt — the user's
+  message is registered as a `message` source and the corrective sentence is
+  quoted verbatim out of it — so what reaches the queue is mechanically
+  verifiable rather than a paraphrase. Three guards bound an over-eager
+  heuristic: a per-session cap (`capture.correction.max_per_session`, default
+  3) counted from the queue so it survives a restart, lexical dedup against
+  approved claims and pending corrections folded together with the #147
+  embedding path, and secret masking before anything durable is written.
+  `capture.correction.enabled` (default true) gates it; declines report
+  `{"captured": false, "reason": ...}` rather than failing silently.
+  `vouch capture-correction`, plus MCP and JSONL.
 - **explicit pins — a working set that always enters the pack** (#615):
   `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
   pages lead every context pack instead of having to win the query each turn,
