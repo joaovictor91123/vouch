@@ -151,6 +151,10 @@ HOT_MEMORY_EXCLUDED: dict[str, str] = {
     ),
     "kb.detect_themes": "cluster analysis — self-contained, not a claim browse",
     "kb.experts": "ranked entity analysis — self-contained, not a claim browse",
+    "kb.effectiveness": (
+        "outcome statistics over surfaced artifacts — a recency sidebar is "
+        "not part of the measurement"
+    ),
     "kb.triage_pending": (
         "advisory overlay on kb.list_pending — carries its own _meta.vouch_triage per item"
     ),
