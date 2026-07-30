@@ -174,6 +174,18 @@ All notable changes to vouch are documented here. Format follows
   behind `vouch review`.
 
 ### Added
+- **bench: four derivation categories** (#617): `passive-consolidation`,
+  `multi-hop-relational`, `temporal-depth` and `aggregation`. Each asks for a
+  fact stated in no single claim, so an expected-answer substring check is
+  impossible; they are graded on a new `MemoryCase.required` — every
+  supporting part must reach the pack inside the budget. The generators draw
+  from a derived rng and their own pools, so the ten existing categories
+  produce byte-identical datasets and reproduce their recorded per-category
+  scores exactly; only the composite moves (0.58 → 0.64) because four rows
+  joined the mean. Measured on stock config: consolidation, temporal-depth and
+  aggregation at 1.00 (win condition W3 wanted > 0.5 against ditto's 0.00),
+  `multi-hop-relational` at 0.17 — the new lever, where a three-link chain
+  loses a link because no hop shares a term with the question.
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
   instructions demoted, change-of-state phrasing boosted) now ships in
