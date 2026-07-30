@@ -14,6 +14,11 @@ All notable changes to vouch are documented here. Format follows
   the archive/supersede/redact controls were supposed to retire. the scan now
   applies the same lifecycle filter as the scope filter beside it. an entity
   whose only claims are retracted still appears, reporting zero live claims.
+- **config quoted `"false"` disables enrich / events / pages_first** (#620):
+  `#558` left three loaders on bare `bool()`, so a quoted `enabled: "false"`
+  left `capture.enrich` and `retrieval.events` on, and turned
+  `retrieval.pages_first` on. all three now use `coerce_bool` like the
+  other config loaders.
 - **vault sync mirrors post-approve WORKING/DRAFT artifacts** (#583):
   `kb_to_vault` now includes durable `WORKING` claims and `DRAFT` pages
   (the propose+approve defaults), so Obsidian mirrors fill without
@@ -46,6 +51,16 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
+- **core PRs can auto-merge, on two mechanical bars.** the blanket "core
+  is never armed" refusal is gone; both authorization surfaces (the
+  `auto-merge` label and the `/auto-merge` comment) now route through one
+  reusable `arm-auto-merge.yml`, which arms any klass only when the
+  `diff coverage` check is green on that head sha *and* the PR carries a
+  closing reference to an issue plind-junior opened. neither bar is
+  recomputed in the write-token job — both are read as metadata, so no PR
+  code executes there. the owner-only guard and deauthorize-on-push are
+  unchanged, and folding the two arming paths into one file removes the
+  drift that left `/auto-merge` with no coverage check at all.
 - **CodeRabbit's verdict no longer gates anything.** the
   `coderabbit-approved` commit status, the 3-strike auto-close, and the
   daily stale-pr reaper are removed, along with the `coderabbit-gate` and
