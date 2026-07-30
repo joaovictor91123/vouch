@@ -45,6 +45,13 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
+  (#543 reopened, root-caused): both functions' own docstrings promise to
+  remove every embedding row for a reindex or a deleted artifact, but
+  neither ever touched the legacy `embeddings` table alongside
+  `embedding_index` — a leaked row permanently tripped `fsck`'s
+  `orphan_embedding` warning with no way to clear it via reindexing, and
+  grew `state.db` unbounded over a KB's lifetime.
 - **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
   flattened `resp.headers` (case-insensitive by design) into a plain
   `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
