@@ -20,6 +20,12 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **kind-aware relation match in `referenced_by`** (#663):
+  relation endpoints are bare ids, so a claim↔claim edge on slug
+  `auth` also blocked deleting a page (or entity) that shared the
+  slug. the gate now resolves each endpoint to a kind (same priority
+  as `_node_exists`) and only counts the relation when it matches the
+  delete target's kind. the #600 cascade option is unchanged.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced

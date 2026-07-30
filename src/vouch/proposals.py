@@ -1147,6 +1147,39 @@ _DELETE_GETTERS = {
 }
 
 
+def _relation_endpoint_kind(store: KBStore, node_id: str) -> str | None:
+    """Resolve a bare relation endpoint id to an artifact kind.
+
+    Mirrors ``KBStore._node_exists`` priority (claim → page → entity →
+    source) so same-slug collisions pick a single kind. Used by
+    ``referenced_by`` so a claim↔claim edge cannot block deleting a page
+    that happens to share the slug (#663 / #600 carve-out).
+    """
+    if not node_id:
+        return None
+    if store._claim_path(node_id).exists():
+        return "claim"
+    if store._page_path(node_id).exists():
+        return "page"
+    if store._entity_path(node_id).exists():
+        return "entity"
+    if (store._source_dir(node_id) / "meta.yaml").exists():
+        return "source"
+    return None
+
+
+def _relation_refers_to(
+    store: KBStore, rel: Relation, target_kind: str, target_id: str,
+) -> bool:
+    """True when ``rel`` endpoints the target id *as* ``target_kind``."""
+    for endpoint in (rel.source, rel.target):
+        if endpoint == target_id and (
+            _relation_endpoint_kind(store, endpoint) == target_kind
+        ):
+            return True
+    return False
+
+
 def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]:
     """Inbound referrers to `target_id` — the "block if referenced" gate.
 
@@ -1165,11 +1198,8 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
         for page in store.list_pages():
             if target_id in page.claims:
                 refs.append(f"page {page.id!r}")
-        # relation endpoints are bare ids without a kind tag; a same-slug
-        # artifact of a different kind could match here. acceptable given the
-        # slug-collision caveat in the spec's "out of scope".
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
         for claim in store.list_claims():
             if claim.id == target_id:
@@ -1182,7 +1212,7 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
                 refs.append(f"claim {claim.id!r}")
     elif target_kind == "page":
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
     elif target_kind == "entity":
         for claim in store.list_claims():
@@ -1192,7 +1222,7 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
             if target_id in page.entities:
                 refs.append(f"page {page.id!r}")
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
     # target_kind == "relation": edges have no inbound refs → refs stays empty
     return refs
