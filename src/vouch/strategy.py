@@ -21,13 +21,19 @@ accidental misbehaviour and raise the bar against a hostile one, but no
 in-process Python guard is a true boundary - a determined attacker who can
 introspect the interpreter (native ctypes/cffi, or pure-Python gc/frame walking
 to reach and neutralise the hook object) can defeat it. The *real* boundary is
-the same one ditto leans on: the scoring job runs on an ephemeral CI runner
-with a read-only token and no secrets, and **strategy code is never
-auto-merged** - it earns a leaderboard place and is shipped only through human
-review. So the worst a full escape achieves during scoring is misbehaviour on a
-throwaway runner that can reach nothing and merge nothing. The sandbox is
-defence in depth; the trust root is the runner's least privilege plus the human
-merge gate.
+the same one ditto leans on, in two parts. First, least privilege at scoring
+time: the scoring job runs on an ephemeral CI runner with a read-only token
+and no secrets, and the write-capable job that arms auto-merge on a dethrone
+checks out nothing and executes no challenger code. Second, quarantine after
+merge: a winning strategy auto-merges into ``contrib/`` (ladder branch only),
+where it is executed exclusively through this sandbox by both gates and the
+bench - never imported in-process - and the ledger/ratchet scripts treat it
+as text. Trusted, importable shipping (promotion into ``vouch.strategies``)
+still happens only through a human-reviewed PR. So a full escape during
+scoring can at worst forge its own verdict and land code in the quarantine
+it already runs in; it cannot reach a write token, secrets, or an import
+path. The sandbox is defence in depth; the trust root is least privilege
+plus the quarantine plus the human gate on shipped defaults.
 """
 
 from __future__ import annotations
