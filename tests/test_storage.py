@@ -640,7 +640,7 @@ def test_approve_page_update_rejects_stale_claim_ref(store: KBStore) -> None:
     )
     pr = propose_page(
         store, title="T", body="updated", claim_ids=["c1"],
-        proposed_by="vault-sync", slug_hint="p1",
+        proposed_by="vault-sync", slug_hint="p1", update_existing=True,
     )
     (store.kb_dir / "claims" / "c1.yaml").unlink()
     # DeadClaimRefsError (a ProposalError) is the specific refusal: the
@@ -842,6 +842,54 @@ def test_propose_page_round_trip_through_approval(store: KBStore) -> None:
     artifact = approve(store, pr.id, approved_by="u")
     assert isinstance(artifact, Page)
     assert store.get_page(artifact.id).body == "body"
+
+
+def test_approve_page_collision_does_not_overwrite(store: KBStore) -> None:
+    # Colliding title/slug must refuse, not silently update_page the durable
+    # artifact. Before the fix, PAGE was exempt from the collision guard and
+    # any matching id took the vault-edit update path.
+    store.put_page(Page(id="deploy-workflow", title="Deploy Workflow",
+                        body="ORIGINAL"))
+    pr = propose_page(
+        store, title="Deploy Workflow", body="WIPED", proposed_by="agent",
+    )
+    with pytest.raises(ProposalError, match="already exists"):
+        approve(store, pr.id, approved_by="reviewer")
+    assert store.get_page("deploy-workflow").body == "ORIGINAL"
+
+
+def test_approve_page_update_existing_opt_in(store: KBStore) -> None:
+    # Explicit update_existing=True (vault_to_kb path) still updates in place.
+    store.put_page(Page(id="alpha-page", title="Alpha", body="old"))
+    pr = propose_page(
+        store, title="Alpha", body="new", proposed_by="vault-sync",
+        slug_hint="alpha-page", update_existing=True,
+    )
+    approve(store, pr.id, approved_by="reviewer")
+    assert store.get_page("alpha-page").body == "new"
+
+
+def test_approve_page_update_fails_if_target_deleted(store: KBStore) -> None:
+    # Page removed between propose and approve: update must refuse, not create.
+    store.put_page(Page(id="alpha-page", title="Alpha", body="old"))
+    pr = propose_page(
+        store, title="Alpha", body="new", proposed_by="vault-sync",
+        slug_hint="alpha-page", update_existing=True,
+    )
+    (store.kb_dir / "pages" / "alpha-page.md").unlink()
+    reason = check_approvable(store, pr.id, approved_by="reviewer")
+    assert reason is not None and "does not exist" in reason
+    with pytest.raises(ProposalError, match="does not exist"):
+        approve(store, pr.id, approved_by="reviewer")
+    assert not (store.kb_dir / "pages" / "alpha-page.md").exists()
+
+
+def test_propose_page_update_existing_requires_target(store: KBStore) -> None:
+    with pytest.raises(ProposalError, match="does not exist"):
+        propose_page(
+            store, title="Ghost", body="b", proposed_by="vault-sync",
+            slug_hint="no-such-page", update_existing=True,
+        )
 
 
 def test_propose_page_rejects_unknown_claim_ref(store: KBStore) -> None:
