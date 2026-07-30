@@ -16,7 +16,9 @@ from dataclasses import dataclass
 
 import yaml
 
+from .config_coerce import coerce_bool
 from .context import _RETRACTED_CLAIM_STATUSES
+from .models import PageStatus
 from .scoping import ViewerContext, is_visible, viewer_from
 from .storage import KBStore
 
@@ -45,7 +47,7 @@ def load_config(store: KBStore) -> RecallConfig:
     if not isinstance(raw, dict):
         return RecallConfig()
     return RecallConfig(
-        enabled=bool(raw.get("enabled", DEFAULT_ENABLED)),
+        enabled=coerce_bool(raw.get("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
         max_chars=int(raw.get("max_chars", DEFAULT_MAX_CHARS)),
     )
 
@@ -79,10 +81,14 @@ def build_digest(
         viewer = viewer_from(config_path=store.config_path)
     live = [c for c in store.list_claims() if c.status not in _RETRACTED_CLAIM_STATUSES]
     all_pages = store.list_pages()
+    active_pages = [p for p in all_pages if p.status != PageStatus.ARCHIVED]
     claims = [c for c in live if is_visible(c.scope, viewer)]
-    pages = [p for p in all_pages if is_visible(p.scope, viewer)]
+    pages = [
+        p for p in active_pages
+        if is_visible(p.scope, viewer)
+    ]
     if stats is not None:
-        stats["hidden"] = (len(live) - len(claims)) + (len(all_pages) - len(pages))
+        stats["hidden"] = (len(live) - len(claims)) + (len(active_pages) - len(pages))
     if not claims and not pages:
         return ""
 

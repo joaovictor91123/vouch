@@ -66,6 +66,21 @@ def resolve_console_dir(
     return None
 
 
+# The SPA shell names the hashed bundle, so it must be revalidated on every
+# load. Served with only Last-Modified a browser applies heuristic freshness
+# and keeps replaying the shell it cached before — after an upgrade that means
+# the previous console build running against the new backend, which fails in
+# whatever way the response shapes changed. `no-cache` still allows a 304 off
+# the ETag, so the cost is one conditional request. Everything vite emits into
+# assets/ is content-hashed and can be kept forever.
+_SHELL_CACHE = {"cache-control": "no-cache"}
+_ASSET_CACHE = {"cache-control": "public, max-age=31536000, immutable"}
+
+
+def _cache_headers(rel: str) -> dict[str, str]:
+    return _ASSET_CACHE if rel.startswith("assets/") else _SHELL_CACHE
+
+
 def _err(status: int, code: str, message: str) -> JSONResponse:
     """The vouch-native error envelope the SPA already understands."""
     return JSONResponse(
@@ -182,8 +197,8 @@ def build_console_app(
             except ValueError:
                 candidate = index
             if candidate.is_file():
-                return FileResponse(candidate)
-        return FileResponse(index)
+                return FileResponse(candidate, headers=_cache_headers(rel))
+        return FileResponse(index, headers=_SHELL_CACHE)
 
     routes = [
         Route("/proxy", _proxy, methods=_PROXY_METHODS),

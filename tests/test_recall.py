@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from vouch import recall
-from vouch.models import ClaimStatus
+from vouch.models import ClaimStatus, PageStatus
 from vouch.proposals import approve, propose_claim, propose_page
 from vouch.storage import KBStore, _starter_config
 
@@ -47,6 +47,18 @@ def test_digest_excludes_retracted_claims(store: KBStore) -> None:
     assert "archived fact" not in d
 
 
+def test_digest_excludes_archived_pages(store: KBStore) -> None:
+    _approve_page(store, "live design")
+    archived = _approve_page(store, "obsolete design")
+    archived.status = PageStatus.ARCHIVED
+    store.update_page(archived)
+
+    d = recall.build_digest(store)
+
+    assert "live design" in d
+    assert "obsolete design" not in d
+
+
 def test_empty_kb_digest_is_empty(store: KBStore) -> None:
     assert recall.build_digest(store) == ""
 
@@ -72,6 +84,13 @@ def test_load_config_override(store: KBStore) -> None:
     cfg = recall.load_config(store)
     assert cfg.enabled is False
     assert cfg.max_chars == 500
+
+
+def test_load_config_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool("false") is True in plain Python, so a mistakenly
+    quoted `enabled: "false"` previously silently kept recall enabled."""
+    store.config_path.write_text('recall:\n  enabled: "false"\n', encoding="utf-8")
+    assert recall.load_config(store).enabled is False
 
 
 def test_starter_config_has_recall_namespace() -> None:

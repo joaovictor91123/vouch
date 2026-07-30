@@ -267,7 +267,7 @@ def test_approve_rechecks_reference_added_after_propose(store: KBStore) -> None:
     pr = propose_delete(store, target_kind="claim", target_id="c1", proposed_by="agent")
     # a page starts referencing c1 AFTER the proposal was filed
     store.put_page(Page(id="p1", title="P", body="", claims=["c1"]))
-    with pytest.raises(ProposalError, match="still referenced"):
+    with pytest.raises(ProposalError, match="referenced"):
         approve(store, pr.id, approved_by="reviewer")
     # target survives, proposal stays pending
     assert store._claim_path("c1").exists()
@@ -307,6 +307,10 @@ def test_approve_delete_idempotent_path_deindexes(store: KBStore) -> None:
 
 
 def test_delete_forbids_self_approval(store: KBStore) -> None:
+    # pin the gate closed: the starter config trusts the agent by default.
+    store.config_path.write_text(
+        "review:\n  auto_approve_on_receipt: false\n", encoding="utf-8"
+    )
     _claim(store, "c1")
     pr = propose_delete(store, target_kind="claim", target_id="c1", proposed_by="same")
     with pytest.raises(ProposalError, match="forbidden_self_approval"):

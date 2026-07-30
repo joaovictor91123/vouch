@@ -18,6 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from . import admission, audit, index_db
+from .config_coerce import coerce_bool
 from .models import (
     ArtifactScope,
     Claim,
@@ -228,7 +229,7 @@ def propose_claim(
                 raise ProposalError(f"unknown source/evidence id: {eid}") from e
     claim_id = slug_hint or _slugify(text)
     claim_text = text.strip()
-    payload = {
+    payload: dict[str, Any] = {
         "id": claim_id,
         "text": claim_text,
         "type": claim_type,
@@ -238,6 +239,16 @@ def propose_claim(
         "tags": tags or [],
     }
     _stamp_scope(store, payload, scope)
+    # Validate against the Claim model itself (same check approve()'s
+    # Claim(**payload) construction and the batch precheck in
+    # _payload_block_reason both already perform) so an out-of-range
+    # confidence or other model-level constraint violation is rejected here,
+    # at propose time, rather than filing a proposal that can never pass
+    # approve() and sits stuck in the pending queue until someone notices.
+    try:
+        Claim(**payload)
+    except (ValidationError, TypeError) as e:
+        raise ProposalError(f"invalid claim payload: {e}") from e
     exclude_claim: str | None = None
     if (store.kb_dir / "claims" / f"{claim_id}.yaml").exists():
         exclude_claim = claim_id
@@ -392,13 +403,23 @@ def propose_entity(
 ) -> Proposal:
     if not name.strip():
         raise ProposalError("entity name is empty")
-    payload = {
+    payload: dict[str, Any] = {
         "id": slug_hint or _slugify(name),
         "name": name.strip(),
         "type": entity_type,
         "aliases": aliases or [],
         "description": description,
     }
+    # Validate against the Entity model itself (same check approve()'s
+    # Entity(**payload) construction and the batch precheck in
+    # _payload_block_reason both already perform) so an invalid entity type
+    # is rejected here, at propose time, rather than filing a proposal that
+    # can never pass approve() and sits stuck in the pending queue until
+    # someone notices.
+    try:
+        Entity(**payload)
+    except (ValidationError, TypeError) as e:
+        raise ProposalError(f"invalid entity payload: {e}") from e
     return _file_proposal(
         store, kind=ProposalKind.ENTITY, payload=payload,
         proposed_by=proposed_by, session_id=session_id,
@@ -447,7 +468,7 @@ def propose_relation(
                     f"unknown source/evidence id: {eid}"
                 ) from e
     rid = f"{src}--{relation}--{target}"
-    payload = {
+    payload: dict[str, Any] = {
         "id": _slugify(rid),
         "source": src,
         "relation": relation,
@@ -455,6 +476,16 @@ def propose_relation(
         "confidence": confidence,
         "evidence": evidence or [],
     }
+    # Validate against the Relation model itself (same check approve()'s
+    # Relation(**payload) construction and the batch precheck in
+    # _payload_block_reason both already perform) so an out-of-range
+    # confidence or an invalid relation type is rejected here, at propose
+    # time, rather than filing a proposal that can never pass approve() and
+    # sits stuck in the pending queue until someone notices.
+    try:
+        Relation(**payload)
+    except (ValidationError, TypeError) as e:
+        raise ProposalError(f"invalid relation payload: {e}") from e
     return _file_proposal(
         store, kind=ProposalKind.RELATION, payload=payload,
         proposed_by=proposed_by, session_id=session_id,
@@ -513,7 +544,16 @@ def propose_delete(
 
 
 def _review_config(store: KBStore) -> dict[str, Any]:
-    """The ``review:`` section of config.yaml, or {} if absent/unreadable."""
+    """the ``review:`` section of config.yaml, or {} if absent/unreadable.
+
+    ``auto_approve_on_receipt`` is normalized to a real bool here -- the
+    single source of truth every caller below reads from -- so a
+    mistakenly-quoted ``auto_approve_on_receipt: "false"`` in config.yaml
+    can never be silently treated as enabled by one call site while another
+    (correctly) treats the same value as disabled. callers that still wrap
+    this in their own ``bool(...)`` are unaffected: bool() on an already-real
+    bool is a no-op.
+    """
     try:
         loaded = yaml.safe_load(
             (store.kb_dir / "config.yaml").read_text(encoding="utf-8")
@@ -521,7 +561,11 @@ def _review_config(store: KBStore) -> dict[str, Any]:
     except Exception:
         return {}
     if isinstance(loaded, dict) and isinstance(loaded.get("review"), dict):
-        return loaded["review"]
+        review = dict(loaded["review"])
+        review["auto_approve_on_receipt"] = coerce_bool(
+            review.get("auto_approve_on_receipt"), False
+        )
+        return review
     return {}
 
 
@@ -656,11 +700,72 @@ def auto_approve_receipts(
     return approved
 
 
-def _payload_block_reason(store: KBStore, proposal: Proposal) -> str | None:
+def auto_approve_pending(
+    store: KBStore, *, actor: str | None = None
+) -> list[Claim | Page | Entity | Relation]:
+    """Approve every pending proposal the configured gate allows.
+
+    The full drain behind auto-approval-by-default. Under
+    ``review.approver_role: trusted-agent`` every pending proposal
+    self-approves through the normal ``approve()`` path — one audit event
+    per artifact, never a parallel write path. Claims go through
+    ``resolve_pending_receipt_claim`` so duplicates of durable claims are
+    closed instead of piling up; pages, entities and relations are approved
+    unless something still blocks them. What stays pending is exactly the
+    human-call residue: protected page kinds, pages with dead claim
+    references, an id already durable with different content, and DELETE
+    proposals (retracting durable knowledge is never drained mechanically).
+
+    Without trusted-agent this falls back to the receipt drain
+    (``auto_approve_receipts``), which is itself a no-op when
+    ``review.auto_approve_on_receipt`` is off — the review gate is honoured,
+    never silently bypassed.
+    """
+    review_cfg = _review_config(store)
+    if review_cfg.get("approver_role") != "trusted-agent":
+        return list(auto_approve_receipts(store, actor=actor))
+    approved: list[Claim | Page | Entity | Relation] = []
+    for proposal in store.list_proposals(ProposalStatus.PENDING):
+        if proposal.kind == ProposalKind.DELETE:
+            continue
+        if proposal.kind == ProposalKind.CLAIM:
+            claim = resolve_pending_receipt_claim(
+                store, proposal,
+                actor=actor or proposal.proposed_by,
+                reason="trusted-agent — auto-approved",
+            )
+            if claim is not None:
+                approved.append(claim)
+            continue
+        approver = actor or proposal.proposed_by
+        if check_approvable(store, proposal.id, approved_by=approver) is not None:
+            continue
+        try:
+            approved.append(
+                approve(
+                    store, proposal.id, approved_by=approver,
+                    reason="trusted-agent — auto-approved",
+                )
+            )
+        except ProposalError:
+            # check_approvable is a dry-run; the write itself can still fail
+            # (e.g. a claim ref deleted between check and approve). Left
+            # pending for a human, the drain survives.
+            continue
+    return approved
+
+
+def _payload_block_reason(
+    store: KBStore, proposal: Proposal, *, skip_dead_claim_refs: bool = False
+) -> str | None:
     """Dry-run the put_*-side ref guards, return reason string or None.
 
     Lets the batch precheck catch dangling refs the write side rejects
     so `vouch approve a b` stays all-or-nothing.
+
+    `skip_dead_claim_refs` omits the page→claim existence check. `approve()`
+    sets it because a dead claim ref is a reviewer decision there, handled by
+    the DeadClaimRefsError / drop_missing_claims path — not a flat block.
     """
     payload = dict(proposal.payload)
     if proposal.kind == ProposalKind.CLAIM:
@@ -693,9 +798,10 @@ def _payload_block_reason(store: KBStore, proposal: Proposal) -> str | None:
             page = Page(**payload)
         except (ValidationError, TypeError) as e:
             return f"invalid page payload: {e}"
-        for cid in page.claims:
-            if not store._claim_path(cid).exists():
-                return f"page {page.id} references unknown claim {cid}"
+        if not skip_dead_claim_refs:
+            for cid in page.claims:
+                if not store._claim_path(cid).exists():
+                    return f"page {page.id} references unknown claim {cid}"
         for eid in page.entities:
             if not store._entity_path(eid).exists():
                 return f"page {page.id} references unknown entity {eid}"
@@ -766,6 +872,9 @@ def approve(
     """
     proposal = store.get_proposal(proposal_id)
     block = _approval_block_reason(store, proposal, approved_by)
+    if block:
+        raise ProposalError(block)
+    block = _payload_block_reason(store, proposal, skip_dead_claim_refs=True)
     if block:
         raise ProposalError(block)
     payload = dict(proposal.payload)
@@ -1202,4 +1311,7 @@ def _slugify(text: str) -> str:
             out.append("-")
             last_dash = True
     slug = "".join(out).strip("-")
-    return slug[:60] or "untitled"
+    # rstrip *after* truncating: cutting at 60 chars can land mid-word and
+    # leave a trailing dash, which makes for an ugly id and a citation that
+    # readers (and looser id matchers) trip over.
+    return slug[:60].rstrip("-") or "untitled"

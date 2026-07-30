@@ -6,7 +6,55 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **hot-memory sidebar still fills after exclude_ids** (#597): compute_hot_memory used to truncate to limit then drop excluded ids, so search/context sidebars under-filled whenever hit ids overlapped the hot set. exclusions are applied while ranking so the sidebar still returns up to limit other recent claims.
+- **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
+  `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
+  longer raises `AttributeError` while building the docker command.
+- **`kb.session_transcript`'s degraded-path test no longer depends on an
+  ambient KB**: it called `handle_request` against whatever `.vouch/` the
+  cwd happened to sit under, so it passed on a developer checkout and
+  failed in CI — where `.vouch/` is gitignored — with an `internal_error`
+  from `_store()`. it now chdirs into a fixture KB and points both
+  transcript locators at empty dirs, so the absence it asserts is the
+  raw transcript's.
+- **`kb.search` excludes retracted claims and archived pages** (#581):
+  `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
+  `ARCHIVED` pages the same way `kb.context` already does, so lifecycle
+  controls are not decorative on the detail-search surface. backends
+  over-fetch a candidate pool before that filter so retracted top-hits
+  cannot starve the requested result limit.
+- **bench grading saw highlight markup**: retrieval wraps query-matched
+  terms in guillemets, which broke the bench's substring checks exactly
+  on query-relevant claims — expected values read as missing (deflating
+  recall categories) and highlighted forbidden values slipped past the
+  zeroing (inflating dump-guard categories). grading now strips the
+  markers; absolute bench scores shift, paired comparisons were fair
+  either way. the reference baseline table is refreshed.
+### Changed
+- **auto approval is the default** (`review.approver_role: trusted-agent`
+  in the starter config): a fresh KB approves the capturing agent's
+  proposals with no human step. nothing bypasses the gate — every write
+  still flows through `proposals.approve()` with one audit event and the
+  `auto_approved` stamp; the new `proposals.auto_approve_pending` drain
+  (run from capture finalize) clears claims, pages, entities and
+  relations, rejects duplicates, and still holds protected page kinds,
+  dead-reference pages, id conflicts and delete proposals for a
+  reviewer. remove `approver_role` from `config.yaml` to put writes back
+  behind `vouch review`.
+
 ### Added
+- **shipped ranking champion** (`vouch.strategies.provenance`): the
+  engine-lane winner (provenance-aware ranking — hearsay and stored
+  instructions demoted, change-of-state phrasing boosted) now ships in
+  the package. new KBs get it via the starter config
+  (`retrieval.strategy`); existing KBs keep byte-identical ordering until
+  they add the key, and `strategy: null` opts out. the competition
+  champion `contrib/strategies/baseline.py` delegates to it, so
+  challengers now have to beat real ranking, not identity order. with a
+  strategy active, retrieval over-fetches a bounded candidate pool and
+  the strategy's top-`limit` survive — de-prioritising below the window
+  genuinely excludes a candidate from the pack.
 - **session-mode answer memory** (`capture.answer_mode`, default `session`):
   claims are extracted once at SessionEnd from the full transcript history
   (`capture_session_answers`, wired into `capture finalize`) instead of on
@@ -108,6 +156,36 @@ All notable changes to vouch are documented here. Format follows
   rather than being mislabelled as an unknown artifact. the CLI's
   `except VaultSyncError` renderer then prints a one-line `Error:` instead
   of an uncaught traceback (#547).
+- `clear` reads a naive `before` as utc instead of raising. a date-only
+  cutoff — `2026-07-01`, the shape the cli help, the console's own error
+  text, and the `kb.clear` docs all advertise — parses naive, and comparing
+  it against a claim's aware `created_at` raised `TypeError`: a traceback
+  from `vouch claims-clear --before`, an error response over mcp/jsonl, and
+  an unhandled 500 on the review console's `/clear-claims`. normalised at
+  the `lifecycle.clear_claims` chokepoint, so all four surfaces are fixed
+  at once; the audit event records the normalised cutoff.
+### Added
+- **ingest selection knob (`vouch ingest --max-claims / --budget-chars`).**
+  capture used to file every substantive sentence of a source — complete,
+  but a restatement of the whole document rather than the facts worth a
+  claim. `extract.select_spans` ranks candidate spans by information density
+  (sum over distinct content words of `1 / document-frequency`, so rare
+  specific terms outweigh stopword-heavy filler) and keeps the best under a
+  claim-count or character budget. it is deterministic and llm-free — and it
+  only ever returns a *subset* of the verbatim spans, never a paraphrase, so
+  every kept claim's receipt still verifies by construction. unset, ingest
+  keeps every span exactly as before (the unbudgeted baseline is unchanged).
+  this is the selection step the compiler thesis needs: fewer, denser claims
+  are what move accuracy-per-token against the grep baseline.
+
+### Fixed
+- **extraction no longer fractures dotted numbers.** `segment_source` split
+  on every `.`, so a version or decimal (`6.8.3`, `3.14`) was broken across
+  segment boundaries and its answer atom fell out of every span — measured at
+  ~11% of the ground-truth facts lost on a synthetic lookup corpus *before any
+  budget was applied*. a `.` flanked by digits is now kept inside the span
+  (sentence-ending periods are unaffected), lifting the recall ceiling of the
+  whole ingest pipeline from 89% to 100% of facts on that corpus.
 
 ## [1.5.0] — 2026-07-20
 
@@ -293,6 +371,27 @@ All notable changes to vouch are documented here. Format follows
   in config.yaml (#476).
 
 ### Fixed
+- `propose-claim`, `propose-relation`, and `propose-entity` now validate
+  the payload against the Claim/Relation/Entity model at propose time
+  instead of only at approve. an out-of-range `--confidence` or an
+  invalid entity/relation type used to file a proposal that could never
+  pass `approve()`, sitting stuck in the pending queue with no clear way
+  to fix it; it is now rejected immediately with the same error message
+  approve would have raised.
+- `pr_bot` core-path classification: `trust-gate.yml`, `auto-merge.yml`,
+  and `comment-command.yml` now source the changed-file list from the REST
+  `pulls/{n}/files` endpoint instead of `gh pr view --json files`, and feed
+  both the new and previous filename into classification. the GraphQL-backed
+  shortcut carries no rename metadata, so a `git mv` of a `CORE_GLOBS` path
+  (e.g. `http_server.py`) made the file invisible to the trust gate and
+  auto-merge arm check. (#505)
+- `vouch lint` no longer flags retired claims as stale. a
+  superseded/archived/redacted claim past the freshness window was
+  reported as a `stale_claim` warning even though it is terminal and not
+  expected to be refreshed — non-actionable noise in the sweep documented
+  as the user-actionable subset. lint now exempts retired statuses,
+  matching the exemption `vouch metrics` and `vouch digest` already made
+  (#478, #484).
 - approve/reject/expire record the audit event *before* moving the
   proposal to decided/. a crash between the two used to leave a durable
   decision with no authoritative history; it now leaves a pending
@@ -410,6 +509,14 @@ All notable changes to vouch are documented here. Format follows
 - demo: dual-path llm configuration — compile & summarize run through
   session-capture replay or directly against the api via a stdlib shim
   wired as `compile.llm_cmd` with a byo `ANTHROPIC_API_KEY`.
+- `vouch contradict-scan` — an offline scanner that groups approved claims
+  by shared entity and heuristically flags same-topic pairs that disagree
+  in polarity. `--dry-run` (default) only prints candidates; without it,
+  each surviving pair files a pending `contradicts` relation proposal via
+  `proposals.propose_relation` for a human `vouch approve` — the scanner
+  itself never writes a `Relation` or a `CONTESTED` status. `--threshold`,
+  `--entity`, and `--limit` tune the scan. scoring lives in the new
+  `src/vouch/contradictions.py`. (#314)
 
 ### Changed
 - ``kb.list_*`` JSONL/MCP responses now use a dict envelope

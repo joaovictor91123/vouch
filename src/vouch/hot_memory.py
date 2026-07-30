@@ -126,6 +126,8 @@ HOT_MEMORY_COVERED: frozenset[str] = frozenset({
     "kb.read_claim",
     "kb.read_entity",
     "kb.read_relation",
+    "kb.read_evidence",
+    "kb.read_source",
     "kb.list_pages",
     "kb.list_claims",
     "kb.list_entities",
@@ -256,29 +258,40 @@ def compute_hot_memory(
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
     now: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Return up to ``limit`` recently-approved claims relevant to ``query``."""
+    """Return up to ``limit`` recently-approved claims relevant to ``query``.
+
+    ``exclude_ids`` are skipped while filling the sidebar so callers that
+    already surfaced those claims (search hits, context pack) still get a
+    full sidebar of *other* hot claims rather than an underfilled list.
+    """
     if limit <= 0:
         return []
 
     now = time.monotonic() if now is None else now
     query_norm = _normalise_query(query)
-    key = _CacheKey(
-        kb_dir=str(store.kb_dir),
-        query_norm=query_norm,
-        limit=limit,
-        max_age_seconds=max_age_seconds,
-    )
-    cached = _SIDEBAR_CACHE.get(key)
-    if cached is not None and (now - cached[0]) < ttl_seconds:
-        rows = cached[1]
-    else:
+    excluded = frozenset(exclude_ids or ())
+
+    # cache the unfiltered ranking only. exclusions are applied while
+    # filling so a cached top-n window is not required to contain every
+    # survivor — when excludes are present we recompute (cheap: one
+    # list_claims pass) so the sidebar can still reach ``limit``.
+    if not excluded:
+        key = _CacheKey(
+            kb_dir=str(store.kb_dir),
+            query_norm=query_norm,
+            limit=limit,
+            max_age_seconds=max_age_seconds,
+        )
+        cached = _SIDEBAR_CACHE.get(key)
+        if cached is not None and (now - cached[0]) < ttl_seconds:
+            return list(cached[1])
         rows = _compute_sidebar(store, query_norm, limit, max_age_seconds)
         _SIDEBAR_CACHE[key] = (now, rows)
-
-    if not exclude_ids:
         return list(rows)
-    excluded = set(exclude_ids)
-    return [r for r in rows if r["id"] not in excluded]
+
+    return _compute_sidebar(
+        store, query_norm, limit, max_age_seconds, exclude_ids=excluded,
+    )
 
 
 def _matches_query(query_norm: str, text_lower: str) -> bool:
@@ -296,6 +309,8 @@ def _compute_sidebar(
     query_norm: str,
     limit: int,
     max_age_seconds: int,
+    *,
+    exclude_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     from datetime import UTC, datetime
 
@@ -308,6 +323,8 @@ def _compute_sidebar(
     candidates: list[tuple[float, datetime, Any, str]] = []
 
     for c in claims:
+        if c.id in exclude_ids:
+            continue
         if not _is_active(c.status):
             continue
         ts_dt = c.last_confirmed_at or c.updated_at
