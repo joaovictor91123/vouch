@@ -146,6 +146,25 @@ def test_build_limit_caps_sections(store: KBStore) -> None:
     assert len(d.decisions) <= 1
 
 
+def test_build_excludes_archived_followups(tmp_path: Path) -> None:
+    # the stale-claims loop right above the followup query skips retired
+    # claims; the followup query has no status predicate, so archiving a
+    # followup page left it showing up as due forever.
+    s = KBStore.init(tmp_path)
+    due = (NOW - timedelta(days=2)).date().isoformat()
+    for pid, status in (("fu-live", PageStatus.ACTIVE), ("fu-archived", PageStatus.ARCHIVED)):
+        s.put_page(
+            Page(
+                id=pid, title=pid, type="followup", status=status,
+                metadata={"due_at": due, "followup_status": "open"},
+            )
+        )
+
+    d = digest_mod.build(s, now=NOW)
+
+    assert [r.id for r in d.followups_due] == ["fu-live"]
+
+
 def test_build_limit_caps_followups(tmp_path: Path) -> None:
     # --limit documents that it caps every section including followups; seed
     # more due-open followups than the limit and confirm the list is bounded
