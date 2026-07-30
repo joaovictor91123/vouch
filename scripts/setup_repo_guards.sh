@@ -5,16 +5,20 @@
 # sets up:
 #   - labels: auto-merge, ci: passing, ci: failing
 #   - repo setting: allow auto-merge
-#   - a branch RULESET requiring a PR, code-owner review, and the ci +
-#     trust-gate + coderabbit-approved status checks — the versionable
-#     replacement for classic branch protection, with org admins allowed to
-#     bypass (so you can still merge your own core PRs, which you can't
-#     self-approve, and override the coderabbit gate when you must).
+#   - a branch RULESET requiring a PR, code-owner review, and the ci status
+#     checks — the versionable replacement for classic branch protection, with
+#     org admins allowed to bypass (so you can still merge your own core PRs,
+#     which you can't self-approve).
 #
-# review is done by CodeRabbit (install its GitHub App). the coderabbit-gate
-# workflow turns its verdict into the required `coderabbit-approved` check, so a
-# pr only auto-merges once CodeRabbit approves; this script does not configure
-# any AI reviewer or secret.
+# review is done by CodeRabbit (install its GitHub App) and is advisory: it
+# files approve / request-changes reviews but gates nothing, so no required
+# check comes from it. this script does not configure any AI reviewer or secret.
+#
+# only list a context that some workflow actually reports. a required check with
+# nothing behind it never reports at all, so every pr sits pending forever
+# instead of failing visibly — that is why `trust-gate` and `coderabbit-approved`
+# are gone from the list: their workflows were removed and the contexts outlived
+# them.
 #
 # VERIFY BEFORE RELYING ON IT (schema/ids are account-specific):
 #   - the required check names below match .github/workflows/ci.yml job names.
@@ -45,7 +49,7 @@ cat > "$rules_body" <<JSON
   "conditions": {"ref_name": {"include": ["refs/heads/$BRANCH"], "exclude": []}},
   "rules": [
     {"type": "pull_request", "parameters": {"require_code_owner_review": true, "required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false, "require_last_push_approval": false, "required_review_thread_resolution": false}},
-    {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": true, "required_status_checks": [{"context": "test (py3.11)"}, {"context": "test (py3.12)"}, {"context": "test (py3.13)"}, {"context": "build sdist + wheel"}, {"context": "trust-gate"}, {"context": "coderabbit-approved"}]}}
+    {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": true, "required_status_checks": [{"context": "test (py3.11)"}, {"context": "test (py3.12)"}, {"context": "test (py3.13)"}, {"context": "build sdist + wheel"}]}}
   ]
 }
 JSON

@@ -20,6 +20,15 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`setup_repo_guards.sh` no longer requires checks that cannot report**:
+  `#630` removed the `trust-gate` workflow and the coderabbit gate removed
+  `coderabbit-approved`, but both contexts stayed in the script's
+  `required_status_checks`, so the provisioning source still declared two
+  checks with no workflow behind them. a required context that never reports
+  leaves the pr pending rather than failing, so it blocks with no red x to
+  point at — every open pr into `test` is stuck this way today. the list is now
+  the four ci contexts that actually run; re-running the script against the
+  live ruleset clears the stale contexts.
 - **hooks quoted `"false"` disables short_circuit / prompt_gate** (#631):
   `#620` / `#558` fixed most loaders, but `short_circuit_cfg` and
   `prompt_gate_cfg` still used bare `bool()`, so a quoted
