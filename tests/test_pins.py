@@ -71,6 +71,60 @@ def test_pinned_item_is_marked_with_the_pin_backend(store: KBStore) -> None:
     assert pack["items"][0]["backend"] == "pin"
 
 
+def test_a_pin_evicts_its_near_duplicate_from_retrieval(store: KBStore) -> None:
+    """The same knowledge stored under a second id must not occupy two slots.
+
+    `_dedupe_near_duplicates` runs before pins are injected, so it never gets
+    to compare a retrieved item against a pin. Exact `(type, id)` matching
+    does not catch it either, because the near-duplicate has a different id.
+    """
+    # 9 of 10 shared tokens -> Jaccard 0.9, over the 0.85 threshold, while the
+    # slugified ids stay distinct so exact matching cannot catch it.
+    pinned = _claim(store, "tokens rotate every twenty four hours per the spec")
+    twin = _claim(store, "tokens rotate every twenty four hours per the spec doc")
+    health.rebuild_index(store)
+    pins.add_pin(store, pinned, pinned_by="human")
+
+    ids = _ids(build_context_pack(store, query="tokens rotate",
+                                  limit=5, max_chars=2000))
+    assert ids[0] == pinned
+    assert twin not in ids, "near-duplicate of a pin took a second slot"
+
+
+def test_near_duplicate_eviction_keeps_the_pin_not_the_higher_score(
+    store: KBStore,
+) -> None:
+    """The pin wins the collision even when retrieval scores its twin higher.
+
+    Deliberately not fixed by moving `_dedupe_near_duplicates` below the pin
+    injection: that pass keeps the highest-scored member of a cluster, and
+    `pages_first` multiplies a page's score past a pin's flat 1.0 — which
+    would evict the pin, the one thing pinning must never allow.
+    """
+    store.config_path.write_text(
+        yaml.safe_dump({
+            "retrieval": {
+                "pins": {"enabled": True},
+                "pages_first": {"enabled": True, "boost": 5.0},
+            }
+        }),
+        encoding="utf-8",
+    )
+    text = "tokens rotate every twenty four hours per the spec"
+    pinned = _claim(store, text)
+    store.put_page(Page(
+        id="p-twin", title=text, body="same knowledge, page form",
+        type=PageType.CONCEPT, status=PageStatus.DRAFT,
+    ))
+    health.rebuild_index(store)
+    pins.add_pin(store, pinned, pinned_by="human")
+
+    ids = _ids(build_context_pack(store, query="tokens rotate",
+                                  limit=5, max_chars=2000))
+    assert ids[0] == pinned
+    assert "p-twin" not in ids
+
+
 def test_a_pinned_artifact_that_also_ranks_appears_once(store: KBStore) -> None:
     spec = _claim(store, "the spec says tokens rotate every 24 hours")
     health.rebuild_index(store)
@@ -366,6 +420,53 @@ def test_cli_expiry_is_accepted_and_shown(store: KBStore) -> None:
     listed = CliRunner().invoke(cli, ["pins", "list"])
     assert "expires" in listed.output
     assert pins.load_pins(store)[0].expires_at is not None
+
+
+def test_cli_expiry_accepts_an_iso_date_in_the_future(store: KBStore) -> None:
+    """An ISO date must expire in the future, not be mirrored into the past.
+
+    `parse_since` returns ISO input unchanged, so mirroring it around now (the
+    handling durations need) turned a future date into a past one and created
+    the pin already expired — silently, since nothing rejects it.
+    """
+    spec = _claim(store, "the spec says tokens rotate every 24 hours")
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+
+    res = CliRunner().invoke(cli, ["pin", spec, "--expires", tomorrow])
+    assert res.exit_code == 0, res.output
+
+    # load_pins drops expired pins on read, so the old inversion made the pin
+    # disappear outright — this list is empty before the fix.
+    live = pins.load_pins(store)
+    assert [p.artifact_id for p in live] == [spec]
+    assert live[0].expires_at is not None
+    assert live[0].expires_at > datetime.now(UTC), f"{tomorrow} stored wrong"
+
+
+def test_cli_expiry_accepts_a_full_iso_timestamp(store: KBStore) -> None:
+    spec = _claim(store, "the spec says tokens rotate every 24 hours")
+    when = (datetime.now(UTC) + timedelta(days=3)).replace(microsecond=0)
+
+    res = CliRunner().invoke(cli, ["pin", spec, "--expires", when.isoformat()])
+    assert res.exit_code == 0, res.output
+    assert pins.load_pins(store)[0].expires_at == when
+
+
+@pytest.mark.parametrize("spec_text", ["all", "", "not-a-real-spec"])
+def test_cli_expiry_rejects_specs_that_mean_no_bound(
+    store: KBStore, spec_text: str
+) -> None:
+    """`all` / `""` resolve to "no lower bound", which as an expiry means never.
+
+    Never-expires is already what omitting the flag does, so accepting these
+    silently would hide a typo rather than honour a request.
+    """
+    spec = _claim(store, "the spec says tokens rotate every 24 hours")
+    res = CliRunner().invoke(cli, ["pin", spec, "--expires", spec_text])
+
+    assert res.exit_code != 0
+    assert "Error:" in res.output
+    assert not pins.load_pins(store), "no pin should be written on a bad expiry"
 
 
 def test_cli_unknown_artifact_is_a_clean_error(store: KBStore) -> None:

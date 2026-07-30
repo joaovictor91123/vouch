@@ -3776,11 +3776,30 @@ def pin_cmd(artifact_id: str, local: bool, expires: str | None,
     expires_at = None
     with _cli_errors():
         if expires is not None:
-            # parse_since counts backwards; a pin expires forwards, so mirror
-            # the delta around now rather than inventing a second date parser.
-            past = metrics_mod.parse_since(expires)
-            if past is not None:
-                expires_at = datetime.now(UTC) + (datetime.now(UTC) - past)
+            # An absolute date is already the answer, so only a duration gets
+            # mirrored. parse_since returns ISO input unchanged, and mirroring
+            # that around now turns a future date into a past one — the pin
+            # would be created already expired, silently.
+            try:
+                expires_at = datetime.fromisoformat(expires)
+            except ValueError:
+                # Not a date, so read it as a duration counted backwards and
+                # mirror it forwards.
+                now = datetime.now(UTC)
+                past = metrics_mod.parse_since(expires)
+                if past is None:
+                    # "all" and "" mean "no lower bound" to parse_since. As an
+                    # expiry that would silently mean "never", which is already
+                    # what omitting the flag does — so it is a typo, not a
+                    # request worth honouring.
+                    raise click.ClickException(
+                        f"--expires {expires!r}: expected a duration like '7d' "
+                        "or an ISO date like '2026-08-15'"
+                    ) from None
+                expires_at = now + (now - past)
+            else:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
         p = pins_mod.add_pin(
             store, artifact_id, pinned_by=_whoami(), local=local,
             expires_at=expires_at, note=note,
