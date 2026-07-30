@@ -313,6 +313,17 @@ def doctor(store: KBStore) -> HealthReport:
                     [vr.source.id],
                 )
             )
+        elif vr.external_status == "missing":
+            detail = f" ({vr.note})" if vr.note else ""
+            report.findings.append(
+                Finding(
+                    "warning",
+                    "source_missing",
+                    f"external file {vr.source.locator} missing or unreadable"
+                    f" since registration{detail}",
+                    [vr.source.id],
+                )
+            )
 
     # Config sanity.
     if not store.config_path.exists():
