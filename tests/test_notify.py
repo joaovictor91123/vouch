@@ -13,7 +13,7 @@ from typing import ClassVar
 
 import pytest
 
-from vouch import notify
+from vouch import notify, proposals
 from vouch.models import Proposal, ProposalKind
 from vouch.storage import KBStore
 
@@ -106,6 +106,36 @@ def test_sweep_aged_and_backlogged(tmp_path: Path, sink_url: str) -> None:
 
     # idempotent: same state, nothing re-fires
     assert notify.sweep(store, now=NOW) == []
+
+
+def test_backlog_alert_rearms_after_dropping_below_threshold(
+    tmp_path: Path, sink_url: str,
+) -> None:
+    """A backlog that drains partway and grows again must alert again — the
+    marker must not stay latched until the queue empties completely."""
+    store = KBStore.init(tmp_path)
+    _configure(
+        store,
+        "notify:\n  webhooks:\n"
+        f"    - url: {sink_url}\n"
+        "      events: [queue.backlogged]\n"
+        "      backlog_threshold: 2\n",
+    )
+    _pending(store, "a")
+    _pending(store, "b")
+    _pending(store, "c")
+
+    assert notify.sweep(store, now=NOW) == ["queue.backlogged"]
+
+    # drops back under the threshold, but not to zero
+    proposals.reject(store, "a", rejected_by="human", reason="test")
+    proposals.reject(store, "b", rejected_by="human", reason="test")
+    assert notify.sweep(store, now=NOW) == []
+
+    # crosses the threshold again without the queue ever hitting zero
+    _pending(store, "d")
+    _pending(store, "e")
+    assert notify.sweep(store, now=NOW) == ["queue.backlogged"]
 
 
 def test_sweep_signs_body_with_env_secret(
