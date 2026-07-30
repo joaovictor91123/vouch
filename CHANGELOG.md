@@ -7,6 +7,17 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
+  measurement-only signal ranking approved artifacts by how the sessions they
+  were surfaced into ended. Per artifact it reports good/bad session counts, an
+  associational lift against the corpus baseline, and a 95% Wilson interval.
+  Verdicts are power-gated — `useful` / `harmful` only when the interval clears
+  the baseline *and* the sample meets `--min-samples`, otherwise `unverified` /
+  `insufficient`, so an untrustworthy number never renders as a confident one.
+  Built on the existing `retrieval_events` surfacing log and the audit stream;
+  no new derived table, nothing written, and a bad verdict never expires
+  anything. `vouch eval effectiveness [--window 90d] [--min-samples N]
+  [--format text|json]`, plus MCP and JSONL.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
@@ -26,6 +37,29 @@ All notable changes to vouch are documented here. Format follows
   slug. the gate now resolves each endpoint to a kind (same priority
   as `_node_exists`) and only counts the relation when it matches the
   delete target's kind. the #600 cascade option is unchanged.
+- **security: empty-quote receipts no longer clear the auto-approve gate**
+  (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
+  guarded only on `quote is None`, not an empty string. An `Evidence` with
+  `quote=""` and a zero-length span (`byte_start == byte_end`) decodes to
+  `""`, trivially string-equals the empty quote, and returned `VERIFIED` —
+  so a claim citing only a forged, content-free receipt cleared
+  `evaluate_claim_receipts` and, with `review.auto_approve_on_receipt`
+  (the starter-config default), landed as a durable, approved claim with
+  zero real evidentiary backing. `Evidence.quote` carries no min-length
+  constraint at the model layer and `bundle`/`sync` intake write incoming
+  Evidence straight to disk after schema validation only, so this was
+  reachable from a hand-crafted bundle or a malicious federation peer, not
+  just the normal propose path (which already routes through
+  `locate_span`'s existing empty-quote guard on the *mint* side). Both
+  guards now reject an empty quote the same way `locate_span` already
+  does, closing the gap on the *verify* side.
+- **`notify sweep`'s backlog alert re-arms after dropping below threshold**
+  (#652): the `queue.backlogged` idempotence marker was a one-way latch,
+  cleared only when the pending queue reached exactly zero — not when it
+  dropped back under `backlog_threshold`. A queue that drained partway and
+  grew again (the common shape of a real backlog) never re-alerted after
+  the first trip. The marker now clears per-hook as soon as the count
+  falls under threshold, so the next crossing fires again.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced
@@ -66,6 +100,13 @@ All notable changes to vouch are documented here. Format follows
   `prompt_gate_cfg` still used bare `bool()`, so a quoted
   `enabled: "false"` silently turned those features *on*. both now
   use `coerce_bool`.
+- **a zero `tail` on `kb.audit` returns no events, not every event**: the
+  window was `events[-tail:]`, and `-0` is `0`, so asking for zero events
+  sliced from the start and handed back the whole visible log — a negative
+  tail dropped that many off the front and returned the rest. all three
+  surfaces (mcp, jsonl, cli) now share `audit.tail_events`, so the clamp
+  cannot drift between them. `retrieval_events.read_events` carried the same
+  `[-limit:]` boundary and is fixed with it.
 - **digest drops archived followup pages** (#625):
   `followups_due` already skipped `done`/`dropped` metadata, but an
   `ARCHIVED` page with `followup_status=open` and a past `due_at` still

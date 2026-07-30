@@ -1152,7 +1152,9 @@ def kb_audit(
         project=project,
         agent=agent,
     )
-    events = list(audit.read_events(store.kb_dir, store=store, viewer=viewer))[-tail:]
+    events = audit.tail_events(
+        list(audit.read_events(store.kb_dir, store=store, viewer=viewer)), tail
+    )
     return {
         "viewer": {"project": viewer.project, "agent": viewer.agent},
         "events": [e.model_dump(mode="json") for e in events],
@@ -1194,6 +1196,37 @@ def kb_eval_embeddings(*, queries_path: str, k: int = 10) -> dict[str, Any]:
         kb_dir=store.kb_dir,
         queries_file=Path(queries_path),
         k=k,
+    )
+
+
+@mcp.tool()
+def kb_effectiveness(
+    *,
+    window: str = "90d",
+    min_samples: int = 5,
+) -> dict[str, Any]:
+    """Per-artifact effectiveness: did surfacing this claim change the outcome?
+
+    Read-only. For every artifact that entered a context pack, reports how the
+    sessions it appeared in ended (good: confirm/approve, bad:
+    contradict/supersede/archive/redact/reject), an associational lift against
+    the corpus baseline, and a 95% Wilson interval.
+
+    Verdicts are power-gated: `useful` / `harmful` only when the interval
+    clears the baseline and the sample meets min_samples, otherwise
+    `unverified` / `insufficient`. Writes nothing and never expires an
+    artifact — it ranks what a reviewer should look at.
+
+    window: duration ("90d"), ISO date, or "all". Bounds the sessions scored.
+    """
+    from .eval.effectiveness import DEFAULT_WINDOW, compute
+
+    # One shared implementation across MCP / JSONL / CLI. An empty/None window
+    # falls back to the default rather than reaching parse_since as "None".
+    return compute(
+        _store(),
+        since=metrics_mod.parse_since(window or DEFAULT_WINDOW),
+        min_samples=min_samples,
     )
 
 

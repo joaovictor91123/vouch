@@ -3911,6 +3911,35 @@ def eval_recall(queries: str, k: int, baseline: str | None,
             raise click.ClickException(message)
 
 
+@eval_group.command("effectiveness")
+@click.option("--window", default=None,
+              help="Sessions to score: a duration (90d), an ISO date, or 'all'.")
+@click.option("--min-samples", default=None, type=int,
+              help="Sessions an artifact needs before a confident verdict is allowed.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True)
+def eval_effectiveness(window: str | None, min_samples: int | None, fmt: str) -> None:
+    """Rank approved artifacts by the outcome of the sessions they entered."""
+    from .eval.effectiveness import (
+        DEFAULT_MIN_SAMPLES,
+        DEFAULT_WINDOW,
+        compute,
+        format_report,
+    )
+
+    store = _load_store()
+    with _cli_errors():
+        result = compute(
+            store,
+            since=metrics_mod.parse_since(window or DEFAULT_WINDOW),
+            min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else min_samples,
+        )
+    if fmt == "json":
+        _emit_json(result)
+        return
+    click.echo(format_report(result))
+
+
 @cli.command()
 @click.option(
     "--embeddings/--no-embeddings",
@@ -3956,7 +3985,9 @@ def audit(tail: int, as_json: bool, project: str | None, agent: str | None) -> N
         project=project,
         agent=agent,
     )
-    events = list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer))[-tail:]
+    events = audit_mod.tail_events(
+        list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer)), tail
+    )
     if as_json:
         _emit_json({
             "viewer": {"project": viewer.project, "agent": viewer.agent},
