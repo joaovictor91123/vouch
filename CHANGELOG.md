@@ -45,6 +45,16 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **rerank / recency / triage quoted `"true"` stays off** (#658):
+  `retrieval.rerank.enabled`, `retrieval.recency.enabled` and
+  `triage.enabled` were the last three readers still on the
+  isinstance/`bool()` pattern, so a quoted `enabled: "true"` fell through to
+  `False` while the sibling values (`top_k`, `half_life_days`) parsed fine
+  and the block looked configured. all three now go through `coerce_bool`,
+  finishing the migration `#620` started for `pages_first` in the same file
+  and `#648` continued for themes / reflex. note the fail direction is the
+  opposite of `#648`'s: there a quoted `"false"` left a feature on, here a
+  quoted `"true"` left it off.
 - **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
   flattened `resp.headers` (case-insensitive by design) into a plain
   `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
