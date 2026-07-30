@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **hooks quoted `"false"` disables short_circuit / prompt_gate** (#631):
+  `#620` / `#558` fixed most loaders, but `short_circuit_cfg` and
+  `prompt_gate_cfg` still used bare `bool()`, so a quoted
+  `enabled: "false"` silently turned those features *on*. both now
+  use `coerce_bool`.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
