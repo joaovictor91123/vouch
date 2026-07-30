@@ -170,6 +170,45 @@ def test_duplication_risk_heuristic_no_match_for_unrelated_text(
     assert "heuristic backend" in dup["reason"]
 
 
+def test_duplication_risk_ignores_archived_claim_twin(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # archived twin must not auto-reject a re-filed claim as a near-duplicate
+    from vouch.models import ClaimStatus
+
+    _no_embedder(monkeypatch)
+    _enable_triage(store)
+    src = store.put_source(b"evidence")
+    text = "prefer postgres over mysql for this service"
+    store.put_claim(
+        Claim(id="old", text=text, evidence=[src.id], status=ClaimStatus.ARCHIVED),
+    )
+    propose_claim(store, text=text, evidence=[src.id], proposed_by="agent")
+    [result] = triage.triage_pending(store)
+    block = result["_meta"]["vouch_triage"]
+    assert block["signals"]["duplication_risk"]["score"] == 0.0
+    assert block["recommendation"] != "reject"
+
+
+def test_duplication_risk_ignores_archived_page_title(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vouch.models import Page, PageStatus
+    from vouch.proposals import propose_page
+
+    _no_embedder(monkeypatch)
+    _enable_triage(store)
+    title = "deploy runbook for the edge fleet"
+    store.put_page(
+        Page(id="old-page", title=title, body="retired", status=PageStatus.ARCHIVED),
+    )
+    propose_page(store, title=title, body="fresh copy", proposed_by="agent")
+    [result] = triage.triage_pending(store)
+    dup = result["_meta"]["vouch_triage"]["signals"]["duplication_risk"]
+    assert dup["score"] == 0.0
+    assert "old-page" not in dup["reason"]
+
+
 def test_duplication_risk_relation_exact_match(
     store: KBStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **triage ignores archived twins for duplication** (#638):
+  claim/page pools used every approved artifact, so an archived claim
+  (or archived page title) with the same text forced `duplication_risk=1.0`
+  and an advisory reject on re-file. pools and embedding hits now skip
+  retracted claims and archived pages, matching search/recall/digest.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
