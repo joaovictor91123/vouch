@@ -7,6 +7,15 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`setup_repo_guards.sh` no longer requires checks that cannot report**:
+  `#630` removed the `trust-gate` workflow and the coderabbit gate removed
+  `coderabbit-approved`, but both contexts stayed in the script's
+  `required_status_checks`, so the provisioning source still declared two
+  checks with no workflow behind them. a required context that never reports
+  leaves the pr pending rather than failing, so it blocks with no red x to
+  point at — every open pr into `test` is stuck this way today. the list is now
+  the four ci contexts that actually run; re-running the script against the
+  live ruleset clears the stale contexts.
 - **salience reflex excludes retracted claims**: `compute_salience` scanned
   every claim regardless of status, so the `_meta.vouch_salience` sidebar
   counted `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims in `claim_count` and
