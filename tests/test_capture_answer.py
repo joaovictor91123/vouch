@@ -21,11 +21,10 @@ from pathlib import Path
 import pytest
 
 from vouch import capture as cap
-
-_RT_CFG = cap.CaptureConfig(realtime=True)
 from vouch.models import ProposalStatus
 from vouch.storage import KBStore
 
+_RT_CFG = cap.CaptureConfig(realtime=True)
 # an answer with three clean, quotable sentences (>160 chars) so segment_source
 # yields receipt-verifiable claims.
 ANSWER = (
@@ -444,8 +443,9 @@ def _enrich_stub(tmp_path: Path, output: str) -> str:
 
 
 def test_finalize_supersedes_updated_claims(store: KBStore, tmp_path: Path) -> None:
-    from vouch.models import ClaimStatus
     import yaml
+
+    from vouch.models import ClaimStatus
 
     store.config_path.write_text(
         yaml.safe_dump(

@@ -103,9 +103,13 @@ def test_observe_masks_secrets_before_buffering(store: KBStore) -> None:
 def test_observe_dedups_within_window(store: KBStore) -> None:
     assert cap.observe(store, "s1", tool="Read", summary="Read a.py", now=100.0, config=_RT_CFG)
     # identical within 60s window -> skipped
-    assert cap.observe(store, "s1", tool="Read", summary="Read a.py", now=130.0, config=_RT_CFG) is False
+    assert cap.observe(
+        store, "s1", tool="Read", summary="Read a.py", now=130.0, config=_RT_CFG,
+    ) is False
     # same key past the window -> written again
-    assert cap.observe(store, "s1", tool="Read", summary="Read a.py", now=200.0, config=_RT_CFG)
+    assert cap.observe(
+        store, "s1", tool="Read", summary="Read a.py", now=200.0, config=_RT_CFG,
+    )
     assert len(cap.buffer_path(store, "s1").read_text().splitlines()) == 2
 
 
@@ -130,8 +134,12 @@ def test_observe_dedups_on_tool_use_id(store: KBStore) -> None:
 
 def test_observe_without_tool_use_id_keeps_window_dedup(store: KBStore) -> None:
     """Hosts that don't send an event id keep the legacy text+window dedup."""
-    assert cap.observe(store, "s1", tool="Read", summary="Read a.py", now=100.0, config=_RT_CFG)
-    assert cap.observe(store, "s1", tool="Read", summary="Read a.py", now=130.0, config=_RT_CFG) is False
+    assert cap.observe(
+        store, "s1", tool="Read", summary="Read a.py", now=100.0, config=_RT_CFG,
+    )
+    assert cap.observe(
+        store, "s1", tool="Read", summary="Read a.py", now=130.0, config=_RT_CFG,
+    ) is False
 
 
 def test_observe_noop_when_disabled(store: KBStore) -> None:
@@ -315,7 +323,10 @@ def test_build_summary_body_renders_git_and_commands() -> None:
 def _seed(store: KBStore, sid: str, n: int) -> None:
     store.config_path.write_text("capture:\n  enabled: true\n  realtime: true\n")
     for i in range(n):
-        cap.observe(store, sid, tool="Edit", summary=f"Edited f{i}.py", now=float(i), config=_RT_CFG)
+        cap.observe(
+            store, sid, tool="Edit", summary=f"Edited f{i}.py",
+            now=float(i), config=_RT_CFG,
+        )
 
 
 def test_finalize_files_one_auto_rejected_page(store: KBStore, tmp_path: Path) -> None:
@@ -507,7 +518,10 @@ def test_cli_observe_never_errors_on_garbage(store: KBStore) -> None:
 def test_cli_finalize_files_proposal(store: KBStore) -> None:
     store.config_path.write_text("capture:\n  enabled: true\n  realtime: true\n")
     for i in range(3):
-        cap.observe(store, "cc-2", tool="Edit", summary=f"Edited f{i}.py", now=float(i), config=_RT_CFG)
+        cap.observe(
+            store, "cc-2", tool="Edit", summary=f"Edited f{i}.py",
+            now=float(i), config=_RT_CFG,
+        )
     payload = _json.dumps({"session_id": "cc-2", "cwd": str(store.kb_dir.parent)})
     res = _run(store, ["capture", "finalize"], stdin=payload)
     assert res.exit_code == 0
@@ -524,7 +538,10 @@ def test_cli_finalize_files_proposal(store: KBStore) -> None:
 def test_cli_banner_silent_after_capture_auto_rejected(store: KBStore) -> None:
     store.config_path.write_text("capture:\n  enabled: true\n  realtime: true\n")
     for i in range(3):
-        cap.observe(store, "cc-3", tool="Edit", summary=f"Edited f{i}.py", now=float(i), config=_RT_CFG)
+        cap.observe(
+            store, "cc-3", tool="Edit", summary=f"Edited f{i}.py",
+            now=float(i), config=_RT_CFG,
+        )
     cap.finalize(store, "cc-3", cwd=store.kb_dir.parent)
     # the session page was auto-rejected by admission, so nothing awaits review:
     # the SessionStart banner stays silent rather than announcing a pending page.

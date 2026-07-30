@@ -73,7 +73,10 @@ def _observe(store: KBStore, sid: str, n: int, tool: str = "Edit") -> None:
     from vouch import capture
     cfg = _rt_cfg()
     for i in range(n):
-        capture.observe(store, sid, tool=tool, summary=f"{tool} file{i}.py", now=float(i), config=cfg)
+        capture.observe(
+            store, sid, tool=tool, summary=f"{tool} file{i}.py",
+            now=float(i), config=cfg,
+        )
 
 
 def test_below_min_skips_and_deletes_buffer(store: KBStore) -> None:
@@ -233,7 +236,10 @@ def test_cap_enforced(store: KBStore, tmp_path: Path) -> None:
 def test_host_neutral_tool_names_do_not_crash(store: KBStore, tmp_path: Path) -> None:
     from vouch import capture
     for i, tool in enumerate(["fs.write", "shell.exec", "browser.open"]):
-        capture.observe(store, "s1", tool=tool, summary=f"{tool} did thing {i}", now=float(i), config=_rt_cfg())
+        capture.observe(
+            store, "s1", tool=tool, summary=f"{tool} did thing {i}",
+            now=float(i), config=_rt_cfg(),
+        )
     capture.observe(store, "s1", tool="fs.write", summary="one more", now=9.0, config=_rt_cfg())
     cmd = _stub_llm(tmp_path, [{"title": "the work", "body": "did things " * 15}])
     _config_with_split(store, cmd, threshold=3)
@@ -242,11 +248,16 @@ def test_host_neutral_tool_names_do_not_crash(store: KBStore, tmp_path: Path) ->
 
 
 def test_truncation_flagged_when_over_budget(store: KBStore, tmp_path: Path) -> None:
-    from vouch import capture
     import yaml
+
+    from vouch import capture
     # distinct summaries so capture.observe's dedup window does not collapse them
     for i in range(50):
-        capture.observe(store, "s1", tool="Edit", summary=f"edit {i} " + "x" * 200, now=float(i), config=_rt_cfg())
+        capture.observe(
+            store, "s1", tool="Edit",
+            summary=f"edit {i} " + "x" * 200,
+            now=float(i), config=_rt_cfg(),
+        )
     cmd = _stub_llm(tmp_path, [{"title": "t", "body": "b " * 20}])
     store.config_path.write_text(
         yaml.safe_dump(
@@ -441,8 +452,9 @@ def _enrich_stub(tmp_path: Path, output: str = ENRICH_JSON) -> str:
 
 
 def test_mechanical_page_enriched(store: KBStore, tmp_path: Path) -> None:
-    from vouch.models import ProposalStatus
     import yaml
+
+    from vouch.models import ProposalStatus
 
     store.config_path.write_text(
         yaml.safe_dump(
