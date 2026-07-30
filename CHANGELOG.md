@@ -7,6 +7,19 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **agent registry — who can write, and what each agent did** (#607):
+  `vouch agents list / show / pause / resume / revoke`, keyed on the
+  `auth_subject` hash `trust.py` already derives, so the committed
+  `.vouch/agents.yaml` holds names, status, scopes and claim dates while the
+  credential itself stays in local config. Pause and revoke are enforced at one
+  chokepoint (`trust.authorized_bearer_token`), so MCP-over-HTTP and
+  JSONL-over-HTTP inherit revocation without two implementations, and a denied
+  token is indistinguishable from a wrong one. Revocation is terminal by
+  design. `vouch agents show` replays every audit event an agent produced
+  alongside the control-plane transitions applied to it — the per-action
+  attribution ditto's own docs stop short of. Existing deployments are
+  unaffected: an unregistered token still authenticates as an unnamed active
+  agent, and a corrupted status fails closed rather than reading as active.
 - **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
   measurement-only signal ranking approved artifacts by how the sessions they
   were surfaced into ended. Per artifact it reports good/bad session counts, an
