@@ -2,9 +2,9 @@
 
 Pure stdlib — no model dependency, no vouch-runtime imports. The CI workflows
 call ``python -m vouch.pr_bot <subcommand>`` for every decision that must be
-trustworthy: an author's trust tier, whether a PR touches core/ui paths, whether
-a UI PR carries before/after screenshots, and whether a labeled PR may arm
-native auto-merge. CodeRabbit runs as a GitHub App and still comments on PRs,
+trustworthy: whether a PR touches core/ui paths, whether a UI PR carries
+before/after screenshots, and whether a labeled PR may arm native auto-merge.
+CodeRabbit runs as a GitHub App and still comments on PRs,
 but its verdict no longer gates anything — nothing here reads it.
 """
 from __future__ import annotations
@@ -43,8 +43,6 @@ UI_GLOBS: tuple[str, ...] = (
     "webapp/**",
 )
 
-_OWNER_ASSOCIATION = "OWNER"
-_BOT_ACTORS = frozenset({"dependabot[bot]"})
 
 
 def _match(path: str, glob: str) -> bool:
@@ -70,10 +68,6 @@ def classify(changed: Sequence[str]) -> dict[str, bool]:
 def klass(changed: Sequence[str]) -> str:
     c = classify(changed)
     return "core" if c["is_core"] else "ui" if c["is_ui"] else "code"
-
-
-def is_trusted(author_association: str, actor: str) -> bool:
-    return author_association == _OWNER_ASSOCIATION or actor in _BOT_ACTORS
 
 
 _GH_IMAGE = re.compile(
@@ -222,10 +216,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         sp = sub.add_parser(name)
         sp.add_argument("--files-file", required=True)
 
-    t = sub.add_parser("trust")
-    t.add_argument("--author-association", required=True)
-    t.add_argument("--actor", required=True)
-
     s = sub.add_parser("has-screenshots")
     s.add_argument("--body-file", required=True)
 
@@ -253,8 +243,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if classify(_read_lines(ns.files_file))["is_core"] else 1
     if ns.cmd == "ui-touched":
         return 0 if _touches(_read_lines(ns.files_file), UI_GLOBS) else 1
-    if ns.cmd == "trust":
-        return 0 if is_trusted(ns.author_association, ns.actor) else 1
     if ns.cmd == "has-screenshots":
         with open(ns.body_file, encoding="utf-8") as fh:
             return 0 if has_before_after_screenshots(fh.read()) else 1

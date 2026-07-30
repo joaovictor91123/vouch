@@ -1,7 +1,7 @@
 # CodeRabbit configuration — https://docs.coderabbit.ai/guides/configure-coderabbit
 # CodeRabbit reviews every non-draft PR automatically (free for this public repo).
 # its verdict is advisory: it gates nothing and closes nothing. the merge path is
-# ci + trust-gate + CODEOWNERS, with the owner's auto-merge label as the go signal.
+# ci + CODEOWNERS, with the owner's auto-merge label as the go signal.
 # request_changes_workflow stays on so its stance is legible at a glance, but a
 # request-changes review no longer blocks or reaps a pr.
 language: "en-US"
