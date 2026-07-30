@@ -31,6 +31,13 @@ def test_load_config_reads_override(store: KBStore) -> None:
     assert cfg.min_observations == 5
 
 
+def test_load_config_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool("false") is True in plain Python, so a mistakenly
+    quoted `enabled: "false"` previously silently kept capture enabled."""
+    store.config_path.write_text('capture:\n  enabled: "false"\n')
+    assert cap.load_config(store).enabled is False
+
+
 def test_buffer_path_under_captures_dir(store: KBStore) -> None:
     p = cap.buffer_path(store, "sess-123")
     assert p == store.kb_dir / "captures" / "sess-123.jsonl"
@@ -536,6 +543,7 @@ def test_adapter_settings_wires_capture_hooks() -> None:
     assert any("capture observe" in c for c in commands("PostToolUse"))
     assert any("capture finalize" in c for c in commands("SessionEnd"))
     assert any("capture banner" in c for c in commands("SessionStart"))
+    assert any("capture finalize-all" in c for c in commands("SessionStart"))
 
 
 def test_capture_finalize_all_cmd_with_old_buffers(tmp_path: Path, monkeypatch) -> None:
@@ -610,6 +618,58 @@ def test_capture_finalize_all_cmd_silent_on_no_kb(tmp_path: Path, monkeypatch) -
 
     # Should exit 0, not fail
     assert result.exit_code == 0
+
+
+def test_capture_finalize_all_cmd_reads_session_from_stdin_payload(store: KBStore) -> None:
+    """Regression for issue #492: the shipped SessionStart hook passes no
+    --session-id and sets no VOUCH_SESSION_ID env var, so the command must
+    read the session id off the stdin hook payload, the same way
+    `capture finalize` already does at SessionEnd."""
+    current_sess = "from-stdin"
+    curr_path = cap.buffer_path(store, current_sess)
+    curr_path.parent.mkdir(parents=True, exist_ok=True)
+    curr_path.write_text('{"ts": 1.0, "tool": "Read", "summary": "test"}\n')
+
+    payload = _json.dumps({"session_id": current_sess})
+    res = _run(store, ["capture", "finalize-all"], stdin=payload)
+
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert current_sess in output["skipped_current"]
+
+
+def test_capture_finalize_all_cmd_session_id_option_overrides_stdin_payload(
+    store: KBStore,
+) -> None:
+    """--session-id stays authoritative over the stdin payload when both
+    are present, matching capture_finalize_cmd's own precedence."""
+    option_sess = "from-option"
+    payload_sess = "from-payload"
+    for sess in (option_sess, payload_sess):
+        p = cap.buffer_path(store, sess)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"ts": 1.0, "tool": "Read", "summary": "test"}\n')
+
+    payload = _json.dumps({"session_id": payload_sess})
+    res = _run(
+        store, ["capture", "finalize-all", "--session-id", option_sess], stdin=payload
+    )
+
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert option_sess in output["skipped_current"]
+    assert payload_sess not in output["skipped_current"]
+
+
+def test_capture_finalize_all_cmd_no_session_id_anywhere_is_noop(store: KBStore) -> None:
+    """No --session-id, no stdin payload, no env var: stays a silent no-op,
+    matching the pre-fix contract for genuinely session-less invocations."""
+    res = _run(store, ["capture", "finalize-all"], stdin="")
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert output["finalized"] == []
+    assert output["skipped_recent"] == []
+    assert output["skipped_current"] == []
 
 
 def test_is_stale_buffer_with_recent_file(tmp_path):
@@ -870,6 +930,16 @@ def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
 # --- personal-KB fallback capture through the hook CLI (phase 3) -----------
 
 
+def _turn_mode(store: KBStore) -> None:
+    """Pin the legacy per-turn answer path — these tests exercise the Stop-hook
+    CLI routing, which only files anything under capture.answer_mode: turn."""
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("capture", {})["answer_mode"] = "turn"
+    store.config_path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+
 @pytest.fixture()
 def _fallback_machine(tmp_path_factory, monkeypatch):
     """Fake home + registry + an opted-in personal KB; returns its store."""
@@ -885,6 +955,7 @@ def _fallback_machine(tmp_path_factory, monkeypatch):
     root = hub.personal_kb_root()
     assert root is not None
     personal = KBStore.init(root)
+    _turn_mode(personal)
     hub.register_kb(root, role="personal", actor="t")
     hub.set_personal_fallback(root, True)
     return personal
@@ -939,6 +1010,7 @@ def test_answer_cli_project_kb_capture_has_no_origin(
     """A project-KB capture is NOT a fallback: no origin stamp, no tag."""
     proj = tmp_path / "realproj"
     store = KBStore.init(proj)
+    _turn_mode(store)
     monkeypatch.chdir(proj)
     transcript = _long_transcript(tmp_path)
     payload = _json.dumps({

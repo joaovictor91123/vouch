@@ -6,6 +6,14 @@ vi.mock('../lib/rpc', async () => {
   const actual = await vi.importActual<typeof import('../lib/rpc')>('../lib/rpc')
   return { ...actual, rpc: vi.fn(), fetchHealth: vi.fn(), fetchCapabilities: vi.fn() }
 })
+
+// MemoryRouter never touches window.location, so id links are asserted on the
+// route they navigate to.
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }))
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return { ...actual, useNavigate: () => navigate }
+})
 import { START_HERE_KEY } from '../lib/claude'
 import { fetchCapabilities, fetchHealth, rpc } from '../lib/rpc'
 import { renderWithProviders, seedConnection } from '../test/utils'
@@ -190,4 +198,23 @@ test('shows the empty state when there are no approved claims', async () => {
   vi.mocked(rpc).mockResolvedValue([])
   renderWithProviders(<ClaimsView />)
   expect(await screen.findByText(/no approved claims yet/i)).toBeInTheDocument()
+})
+
+test('an inline [claim: id] marker in the claim text opens that claim', async () => {
+  const citing = {
+    ...CLAIM,
+    id: 'gate-is-mandatory',
+    text: 'the gate is mandatory [claim: review-gate-is-the-ingest-review] by design',
+  }
+  vi.mocked(rpc).mockImplementation(async (_c, method) => {
+    if (method === 'kb.list_claims') return [citing]
+    if (method === 'kb.why') return WHY
+    return []
+  })
+  renderWithProviders(<ClaimsView />)
+  await userEvent.click(await screen.findByText(/gate-is-mandatory/))
+  await userEvent.click(
+    await screen.findByRole('button', { name: 'review-gate-is-the-ingest-review' }),
+  )
+  expect(navigate).toHaveBeenCalledWith('/browse/claim/review-gate-is-the-ingest-review')
 })

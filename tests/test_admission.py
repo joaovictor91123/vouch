@@ -20,6 +20,8 @@ FRAGMENT_CLAIMS = [
     "com/vouchdev/vouch/pull/517) is open",             # stray close paren
     "- [adapters/claude-code/README.",                  # unbalanced bracket
     "The dorahack entry in `~/.",                       # unbalanced backtick
+    "✨ **What's new**",                            # emoji + bold heading label
+    "**Summary**",                                      # bold-only label
 ]
 
 # claims the adversarial pass PROVED were being wrongly hard-rejected — the gate
@@ -48,6 +50,21 @@ def store(tmp_path, monkeypatch) -> KBStore:
     return s
 
 
+def test_load_config_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool("false") is True in plain Python, so a mistakenly
+    quoted `enabled: "false"` previously silently kept admission gating on,
+    and `reject_uncited_session_pages: "false"` kept that rule on too."""
+    store.config_path.write_text(
+        store.config_path.read_text(encoding="utf-8")
+        + '\nadmission:\n  enabled: "false"\n'
+        '  reject_uncited_session_pages: "false"\n',
+        encoding="utf-8",
+    )
+    cfg = admission.load_config(store)
+    assert cfg.enabled is False
+    assert cfg.reject_uncited_session_pages is False
+
+
 # ---------------------------------------------------------------- pure predicate
 @pytest.mark.parametrize("text", FRAGMENT_CLAIMS)
 def test_assess_claim_rejects_structural_fragments(text: str) -> None:
@@ -64,6 +81,41 @@ def test_assess_claim_admits_durable_claims(text: str) -> None:
 @pytest.mark.parametrize("text", PRECISION_REGRESSIONS)
 def test_assess_claim_admits_previously_false_rejected(text: str) -> None:
     assert admission.assess_claim(text).admit, f"regressed to a false reject: {text!r}"
+
+
+def test_assess_claim_rejects_emphasis_heading_labels() -> None:
+    """Emoji/bold heading labels are not claims — the '##' rule cannot see them.
+
+    Regression for "✨ **What's new**", a section header the receipt-verified
+    auto-approve path was laundering into approved knowledge.
+    """
+    for label in ("✨ **What's new**", "**Summary**", "📝 **Notes**", "***TODO***"):
+        verdict = admission.assess_claim(label)
+        assert not verdict.admit, f"should reject label: {label!r}"
+        assert verdict.reason
+
+
+def test_assess_claim_admits_inline_emphasis_prose() -> None:
+    """A claim that merely *contains* emphasis is prose, not a label — admit it.
+
+    Precision guard so the emphasis-label rule never eats a real claim: a fully
+    wrapped span is a label, a wrapped word inside a sentence is not.
+    """
+    assert admission.assess_claim(
+        "The release ships with **trusted** publishing enabled on pypi."
+    ).admit
+    assert admission.assess_claim(
+        "Use **kwargs to accept arbitrary keyword arguments in Python."
+    ).admit
+
+
+def test_autocapture_emphasis_label_is_auto_rejected(store: KBStore) -> None:
+    src = store.put_source(b"here is a source body", title="t")
+    result = propose_claim(
+        store, text="✨ **What's new**", evidence=[src.id],
+        proposed_by="vouch-capture",  # passive firehose actor
+    )
+    assert result.proposal.status is ProposalStatus.REJECTED
 
 
 def test_resolve_pending_receipt_claim_skips_gate_rejected(store: KBStore) -> None:

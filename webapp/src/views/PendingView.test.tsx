@@ -6,6 +6,14 @@ vi.mock('../lib/rpc', async () => {
   const actual = await vi.importActual<typeof import('../lib/rpc')>('../lib/rpc')
   return { ...actual, rpc: vi.fn(), fetchHealth: vi.fn(), fetchCapabilities: vi.fn() }
 })
+
+// MemoryRouter never touches window.location, so id links are asserted on the
+// route they navigate to.
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }))
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return { ...actual, useNavigate: () => navigate }
+})
 import { fetchCapabilities, fetchHealth, rpc, VouchRpcError } from '../lib/rpc'
 import { renderWithProviders, seedConnection } from '../test/utils'
 import { PendingView } from './PendingView'
@@ -151,10 +159,10 @@ test('merge: selecting two page proposals sends kb.merge_pending and shows the m
     throw new Error(`unexpected ${method}`)
   })
   renderWithProviders(<PendingView />)
-  await userEvent.click(await screen.findByLabelText('select prop-page-a for merge'))
+  await userEvent.click(await screen.findByLabelText('select prop-page-a'))
   // one selection is not mergeable yet
   expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
-  await userEvent.click(screen.getByLabelText('select prop-page-b for merge'))
+  await userEvent.click(screen.getByLabelText('select prop-page-b'))
   await userEvent.click(screen.getByRole('button', { name: /merge 2 into one/i }))
   await waitFor(() =>
     expect(rpc).toHaveBeenCalledWith(expect.anything(), 'kb.merge_pending', {
@@ -164,7 +172,7 @@ test('merge: selecting two page proposals sends kb.merge_pending and shows the m
   expect(await screen.findByText(/merged 2 → prop-merged/i)).toBeInTheDocument()
 })
 
-test('merge checkboxes are absent when kb.merge_pending is not advertised', async () => {
+test('selection checkbox drives batch-approve; merge button is absent without kb.merge_pending', async () => {
   const pageA = {
     ...PROPOSAL,
     id: 'prop-page-a',
@@ -174,7 +182,11 @@ test('merge checkboxes are absent when kb.merge_pending is not advertised', asyn
   vi.mocked(rpc).mockResolvedValue([pageA])
   renderWithProviders(<PendingView />)
   await screen.findByText(/prop-page-a/)
-  expect(screen.queryByLabelText(/for merge/)).not.toBeInTheDocument()
+  // the row is approvable, so a selection checkbox is present for batch approve …
+  expect(screen.getByLabelText('select prop-page-a')).toBeInTheDocument()
+  // … but with kb.merge_pending unadvertised there is no merge action
+  await userEvent.click(screen.getByLabelText('select prop-page-a'))
+  expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
 })
 
 test('approve removes the proposal from the queue before the server responds (optimistic)', async () => {
@@ -402,4 +414,31 @@ test('hides proposals whose session is still awaiting a summary', async () => {
   await screen.findByText(/20260704-021728-c4b86871/)
   // once the sessions list is in, the unsummarized capture is filtered out
   await waitFor(() => expect(screen.queryByText(/prop-session-raw/)).not.toBeInTheDocument())
+})
+
+test('evidence ids in a pending payload open the artifact they cite', async () => {
+  const cited = {
+    ...PROPOSAL,
+    payload: {
+      text: 'The vouch HTTP server binds 127.0.0.1:8731 by default',
+      evidence: ['ev-00053fcb82b37ffe'],
+      confidence: 0.7,
+    },
+  }
+  vi.mocked(fetchCapabilities).mockResolvedValue({
+    ...CAPS,
+    methods: [...CAPS.methods, 'kb.read_evidence'],
+  })
+  vi.mocked(rpc).mockImplementation(async (_c, method) => {
+    if (method === 'kb.list_pending') return [cited]
+    if (method === 'kb.read_evidence') return { id: 'ev-00053fcb82b37ffe', quote: 'binds 8731' }
+    return []
+  })
+  renderWithProviders(<PendingView />)
+  await userEvent.click(await screen.findByText(/20260704-021728-c4b86871/))
+  await userEvent.click(await screen.findByRole('button', { name: 'ev-00053fcb82b37ffe' }))
+  // the shape hint routes `ev-…` straight at kb.read_evidence
+  await waitFor(() =>
+    expect(navigate).toHaveBeenCalledWith('/browse/evidence/ev-00053fcb82b37ffe'),
+  )
 })

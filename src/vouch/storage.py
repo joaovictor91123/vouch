@@ -81,17 +81,25 @@ def _starter_config() -> dict[str, Any]:
         "review": {
             "require_human_approval": False,
             "expire_pending_after_days": 90,
+            # auto approval is the default: the capturing agent's proposals
+            # self-approve through the same proposals.approve() gate (one
+            # audit event per artifact, duplicates rejected, protected page
+            # kinds and DELETE proposals still held for a reviewer). Remove
+            # approver_role to put every other write behind `vouch review`.
+            "approver_role": "trusted-agent",
             # phase d — the receipt is the reviewer. When true, a claim whose
             # byte-offset receipts all verify is auto-approved with no human;
-            # a claim that cannot quote its source is left pending, as is
-            # every page/entity/relation proposal. Set false to put every
-            # write behind `vouch review`.
+            # a claim that cannot quote its source is left pending. Only
+            # consulted when approver_role does not already clear the write.
             "auto_approve_on_receipt": True,
         },
         "capture": {
             # auto-capture agent sessions into pending summaries.
             "enabled": True,
             "min_observations": 3,
+            # answer memory: "session" extracts claims once at SessionEnd from
+            # the full transcript; "turn" files claims on every Stop hook.
+            "answer_mode": "session",
             "split": {
                 # llm topical split for large sessions; llm_cmd falls back to
                 # compile.llm_cmd when null. see session_split.py.
@@ -130,6 +138,11 @@ def _starter_config() -> dict[str, Any]:
             "prompt_gate": {
                 "enabled": True,
             },
+            # the reigning engine-lane champion, applied as the final
+            # reorder stage of every context pack (see vouch.strategies).
+            # new KBs get it on; existing KBs keep byte-identical ordering
+            # until they add this key. set to null to opt out.
+            "strategy": "vouch.strategies.provenance",
         },
         "agents": {
             "recommended_loop": [
@@ -428,8 +441,13 @@ class KBStore:
             schema_version_file.write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         gi = kb.kb_dir / ".gitignore"
         if not gi.exists():
-            # state.db is derived; proposed/ is the agent's scratch space.
-            gi.write_text("proposed/\ncaptures/\nstate.db\nstate.db-*\n", encoding="utf-8")
+            # state.db is derived; proposed/ is the agent's scratch space;
+            # retrieval_events is local telemetry (see retrieval_events.py).
+            gi.write_text(
+                "proposed/\ncaptures/\nretrieval_events.jsonl*\n"
+                "state.db\nstate.db-*\n",
+                encoding="utf-8",
+            )
         return kb
 
     # --- identity ----------------------------------------------------------
@@ -767,7 +785,14 @@ class KBStore:
 
     # --- pages -------------------------------------------------------------
 
-    def put_page(self, page: Page) -> Page:
+    def _validate_page_refs(self, page: Page) -> None:
+        """Reject dangling graph references on a Page before it lands.
+
+        Mirrors `_validate_claim_refs` and the write-time gate on
+        `put_relation`: page edits (vault-sync approve path via
+        `update_page`) must not reintroduce the gap that `put_page` already
+        closed for new pages.
+        """
         for cid in page.claims:
             if not self._claim_path(cid).exists():
                 raise ValueError(f"page {page.id} references unknown claim {cid}")
@@ -777,6 +802,9 @@ class KBStore:
         for sid in page.sources:
             if not (self._source_dir(sid) / "meta.yaml").exists():
                 raise ValueError(f"page {page.id} references unknown source {sid}")
+
+    def put_page(self, page: Page) -> Page:
+        self._validate_page_refs(page)
         try:
             # Explicit UTF-8: page bodies are user / agent prose and routinely
             # contain non-ASCII (em-dashes, smart quotes, unicode in claims).
@@ -806,6 +834,14 @@ class KBStore:
         """
         if not self._page_path(page.id).exists():
             raise ArtifactNotFoundError(f"page {page.id}")
+        # Re-validate the in-memory Page before persisting so model
+        # invariants hold even when a caller mutated fields in place after
+        # get_page(). Field validators only run at construction time.
+        Page.model_validate(page.model_dump(mode="json"))
+        # Re-check graph references too: an in-place mutation (or a claim
+        # deleted between propose and approve on the vault-edit path) can
+        # introduce dangling links that the model validator can't catch.
+        self._validate_page_refs(page)
         self._page_path(page.id).write_text(
             _serialize_page(page), encoding="utf-8"
         )
