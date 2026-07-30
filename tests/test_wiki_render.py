@@ -76,6 +76,26 @@ def test_backlinks_resolve_through_aliases() -> None:
     assert bl.get("beta") == ["Alpha"]
 
 
+def test_a_real_title_beats_another_pages_alias() -> None:
+    # Alpha claims "Beta" as an alias while Beta is actually titled that. With
+    # titles and aliases indexed in a single pass per page, Alpha's alias landed
+    # first purely because Alpha comes first in the list, so `[[Beta]]` resolved
+    # to Alpha — and since a self-link is dropped, Beta lost the backlink too.
+    a = _page("Alpha", body="see [[Beta]]", aliases=["Beta"], pid="alpha")
+    b = _page("Beta", body="a standalone leaf page", pid="beta")
+    pages = [a, b]
+
+    assert wiki_render.resolve_link("Beta", pages) is b
+    assert wiki_render.backlinks(pages).get("beta") == ["Alpha"]
+
+
+def test_alias_still_resolves_when_no_title_claims_it() -> None:
+    # The two-pass index must not cost aliases their resolution.
+    a = _page("Alpha", body="builds on [[the beta]]", pid="alpha")
+    b = _page("Beta", aliases=["the beta"], pid="beta")
+    assert wiki_render.resolve_link("the beta", [a, b]) is b
+
+
 def test_render_moc_ranks_by_inbound_links() -> None:
     a = _page("Alpha", body="see [[Gamma]]", pid="alpha")
     b = _page("Beta", body="see [[Gamma]]", pid="beta")

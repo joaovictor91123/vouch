@@ -7,6 +7,17 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
+  measurement-only signal ranking approved artifacts by how the sessions they
+  were surfaced into ended. Per artifact it reports good/bad session counts, an
+  associational lift against the corpus baseline, and a 95% Wilson interval.
+  Verdicts are power-gated — `useful` / `harmful` only when the interval clears
+  the baseline *and* the sample meets `--min-samples`, otherwise `unverified` /
+  `insufficient`, so an untrustworthy number never renders as a confident one.
+  Built on the existing `retrieval_events` surfacing log and the audit stream;
+  no new derived table, nothing written, and a bad verdict never expires
+  anything. `vouch eval effectiveness [--window 90d] [--min-samples N]
+  [--format text|json]`, plus MCP and JSONL.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
@@ -20,6 +31,55 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **security: empty-quote receipts no longer clear the auto-approve gate**
+  (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
+  guarded only on `quote is None`, not an empty string. An `Evidence` with
+  `quote=""` and a zero-length span (`byte_start == byte_end`) decodes to
+  `""`, trivially string-equals the empty quote, and returned `VERIFIED` —
+  so a claim citing only a forged, content-free receipt cleared
+  `evaluate_claim_receipts` and, with `review.auto_approve_on_receipt`
+  (the starter-config default), landed as a durable, approved claim with
+  zero real evidentiary backing. `Evidence.quote` carries no min-length
+  constraint at the model layer and `bundle`/`sync` intake write incoming
+  Evidence straight to disk after schema validation only, so this was
+  reachable from a hand-crafted bundle or a malicious federation peer, not
+  just the normal propose path (which already routes through
+  `locate_span`'s existing empty-quote guard on the *mint* side). Both
+  guards now reject an empty quote the same way `locate_span` already
+  does, closing the gap on the *verify* side.
+- **`notify sweep`'s backlog alert re-arms after dropping below threshold**
+  (#652): the `queue.backlogged` idempotence marker was a one-way latch,
+  cleared only when the pending queue reached exactly zero — not when it
+  dropped back under `backlog_threshold`. A queue that drained partway and
+  grew again (the common shape of a real backlog) never re-alerted after
+  the first trip. The marker now clears per-hook as soon as the count
+  falls under threshold, so the next crossing fires again.
+- **`kb.explain_ranking` no longer leaks status-filtered candidate text**
+  (#650): a retracted/superseded/redacted claim or archived page correctly
+  reported `gate: "status-filtered"`, but its `summary` was still sourced
+  from the pre-status-filter candidate set, so the full text came back
+  anyway. `#640` fixed the equivalent leak for scope-filtered candidates;
+  this extends the same withholding to the status gate — summaries now
+  come from the post-status-filter set, matching what `kb.search` and
+  `kb.context` already exclude.
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
+- **`mask_secrets` now catches underscore-adjacent credential key names**
+  (#646): the `\b` word boundaries around the keyword alternation treat `_`
+  as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
+  and `AWS_SECRET_ACCESS_KEY=` — the dominant real-world naming shape for
+  these env-vars — passed through unmasked. switched to explicit
+  alphanumeric lookaround so underscore-delimited segments match while
+  substrings like `tokenized=` stay excluded. affects both the capture-time
+  guard and the `vouch redact` remediation backstop, which share the regex.
+- **triage ignores archived twins for duplication** (#638):
+  claim/page pools used every approved artifact, so an archived claim
+  (or archived page title) with the same text forced `duplication_risk=1.0`
+  and an advisory reject on re-file. pools and embedding hits now skip
+  retracted claims and archived pages, matching search/recall/digest.
 - **`setup_repo_guards.sh` no longer requires checks that cannot report**:
   `#630` removed the `trust-gate` workflow and the coderabbit gate removed
   `coderabbit-approved`, but both contexts stayed in the script's
@@ -46,6 +106,13 @@ All notable changes to vouch are documented here. Format follows
   `ARCHIVED` page with `followup_status=open` and a past `due_at` still
   appeared every morning — stale claims were filtered, pages were not.
   mirror recall: archived followups leave the due list.
+- **`kb.explain_ranking` no longer returns the summary of a scope-filtered
+  candidate**: the report listed every candidate the pipeline saw, sourcing
+  summaries from the pre-scope fused set, so a viewer got back the claim text
+  of artifacts `kb.search` and `kb.context` withhold for that same viewer — the
+  opposite of the module's stated scoping invariant. the candidate is still
+  listed with its `scope-filtered` gate, since naming the gate that hid it is
+  the point of the report; only the summary is withheld.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
@@ -138,6 +205,18 @@ All notable changes to vouch are documented here. Format follows
   behind `vouch review`.
 
 ### Added
+- **bench: four derivation categories** (#617): `passive-consolidation`,
+  `multi-hop-relational`, `temporal-depth` and `aggregation`. Each asks for a
+  fact stated in no single claim, so an expected-answer substring check is
+  impossible; they are graded on a new `MemoryCase.required` — every
+  supporting part must reach the pack inside the budget. The generators draw
+  from a derived rng and their own pools, so the ten existing categories
+  produce byte-identical datasets and reproduce their recorded per-category
+  scores exactly; only the composite moves (0.58 → 0.64) because four rows
+  joined the mean. Measured on stock config: consolidation, temporal-depth and
+  aggregation at 1.00 (win condition W3 wanted > 0.5 against ditto's 0.00),
+  `multi-hop-relational` at 0.17 — the new lever, where a three-link chain
+  loses a link because no hop shares a term with the question.
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
   instructions demoted, change-of-state phrasing boosted) now ships in
