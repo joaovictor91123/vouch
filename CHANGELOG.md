@@ -7,6 +7,17 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **operator profile page** (#614): `vouch compile --profile` drafts a single
+  "how this operator works" page from approved claims and files it PENDING like
+  any other page. Selection is **opt-in, never inferred** — a claim qualifies by
+  carrying a `compile.profile_tags` tag (default `preference`, `convention`,
+  `decision`, `correction`) or by naming `compile.profile_entity`, not by
+  looking like a first-person sentence. The prompt forbids personality, trait
+  and psychometric inference outright, and every substantive sentence must cite
+  a claim or it is dropped, so the page can only ever restate what was already
+  approved. A draft citing anything outside the selected set is refused. A
+  refresh re-proposes rather than rewriting, so the history of what the system
+  believed about you stays auditable instead of being silently mutated.
 - **explicit pins — a working set that always enters the pack** (#615):
   `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
   pages lead every context pack instead of having to win the query each turn,
