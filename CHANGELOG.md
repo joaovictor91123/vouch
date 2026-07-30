@@ -363,6 +363,13 @@ All notable changes to vouch are documented here. Format follows
   in config.yaml (#476).
 
 ### Fixed
+- `pr_bot` core-path classification: `trust-gate.yml`, `auto-merge.yml`,
+  and `comment-command.yml` now source the changed-file list from the REST
+  `pulls/{n}/files` endpoint instead of `gh pr view --json files`, and feed
+  both the new and previous filename into classification. the GraphQL-backed
+  shortcut carries no rename metadata, so a `git mv` of a `CORE_GLOBS` path
+  (e.g. `http_server.py`) made the file invisible to the trust gate and
+  auto-merge arm check. (#505)
 - `vouch lint` no longer flags retired claims as stale. a
   superseded/archived/redacted claim past the freshness window was
   reported as a `stale_claim` warning even though it is terminal and not
