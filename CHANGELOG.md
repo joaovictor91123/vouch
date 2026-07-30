@@ -20,6 +20,22 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **security: empty-quote receipts no longer clear the auto-approve gate**
+  (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
+  guarded only on `quote is None`, not an empty string. An `Evidence` with
+  `quote=""` and a zero-length span (`byte_start == byte_end`) decodes to
+  `""`, trivially string-equals the empty quote, and returned `VERIFIED` —
+  so a claim citing only a forged, content-free receipt cleared
+  `evaluate_claim_receipts` and, with `review.auto_approve_on_receipt`
+  (the starter-config default), landed as a durable, approved claim with
+  zero real evidentiary backing. `Evidence.quote` carries no min-length
+  constraint at the model layer and `bundle`/`sync` intake write incoming
+  Evidence straight to disk after schema validation only, so this was
+  reachable from a hand-crafted bundle or a malicious federation peer, not
+  just the normal propose path (which already routes through
+  `locate_span`'s existing empty-quote guard on the *mint* side). Both
+  guards now reject an empty quote the same way `locate_span` already
+  does, closing the gap on the *verify* side.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced
