@@ -27,6 +27,14 @@ All notable changes to vouch are documented here. Format follows
   grew again (the common shape of a real backlog) never re-alerted after
   the first trip. The marker now clears per-hook as soon as the count
   falls under threshold, so the next crossing fires again.
+- **`kb.explain_ranking` no longer leaks status-filtered candidate text**
+  (#650): a retracted/superseded/redacted claim or archived page correctly
+  reported `gate: "status-filtered"`, but its `summary` was still sourced
+  from the pre-status-filter candidate set, so the full text came back
+  anyway. `#640` fixed the equivalent leak for scope-filtered candidates;
+  this extends the same withholding to the status gate — summaries now
+  come from the post-status-filter set, matching what `kb.search` and
+  `kb.context` already exclude.
 - **themes / salience quoted `"false"` disables** (#648):
   `themes.enabled` and `retrieval.reflex.enabled` still used the
   isinstance/bool fail-open pattern, so a quoted `enabled: "false"`

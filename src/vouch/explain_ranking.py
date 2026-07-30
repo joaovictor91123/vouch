@@ -283,12 +283,13 @@ def explain_ranking(
 
     # Every candidate the pipeline ever saw, in the order fusion produced them,
     # so a dropped artifact is still explained rather than silently missing.
-    # Summaries come from the *scoped* set: a candidate the viewer cannot
-    # retrieve keeps its gate attribution — that is the point of the report —
-    # but not its text. `kb.search` and `kb.context` withhold that summary for
-    # this viewer, so this surface must not hand it back.
+    # Summaries come from the *live* set: a candidate the viewer cannot
+    # retrieve, or that was retracted/superseded/archived, keeps its gate
+    # attribution — that is the point of the report — but not its text.
+    # `kb.search` and `kb.context` withhold that summary for this viewer and
+    # this status, so this surface must not hand it back either.
     candidates: list[dict[str, Any]] = []
-    summaries = {_key(h): h[2] for h in scoped}
+    summaries = {_key(h): h[2] for h in live}
     for hit in hits:
         key = _key(hit)
         rows, gate = _stage_rows(key, snapshots)
