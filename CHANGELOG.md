@@ -14,6 +14,7 @@ All notable changes to vouch are documented here. Format follows
   and stale *mirror-owned* files are deleted (untracked user markdown
   under the vault house is preserved) so the vault cannot keep serving
   dead knowledge.
+- **hot-memory sidebar still fills after exclude_ids** (#597): compute_hot_memory used to truncate to limit then drop excluded ids, so search/context sidebars under-filled whenever hit ids overlapped the hot set. exclusions are applied while ranking so the sidebar still returns up to limit other recent claims.
 - **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
   `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
   longer raises `AttributeError` while building the docker command.
@@ -369,6 +370,27 @@ All notable changes to vouch are documented here. Format follows
   in config.yaml (#476).
 
 ### Fixed
+- `propose-claim`, `propose-relation`, and `propose-entity` now validate
+  the payload against the Claim/Relation/Entity model at propose time
+  instead of only at approve. an out-of-range `--confidence` or an
+  invalid entity/relation type used to file a proposal that could never
+  pass `approve()`, sitting stuck in the pending queue with no clear way
+  to fix it; it is now rejected immediately with the same error message
+  approve would have raised.
+- `pr_bot` core-path classification: `trust-gate.yml`, `auto-merge.yml`,
+  and `comment-command.yml` now source the changed-file list from the REST
+  `pulls/{n}/files` endpoint instead of `gh pr view --json files`, and feed
+  both the new and previous filename into classification. the GraphQL-backed
+  shortcut carries no rename metadata, so a `git mv` of a `CORE_GLOBS` path
+  (e.g. `http_server.py`) made the file invisible to the trust gate and
+  auto-merge arm check. (#505)
+- `vouch lint` no longer flags retired claims as stale. a
+  superseded/archived/redacted claim past the freshness window was
+  reported as a `stale_claim` warning even though it is terminal and not
+  expected to be refreshed — non-actionable noise in the sweep documented
+  as the user-actionable subset. lint now exempts retired statuses,
+  matching the exemption `vouch metrics` and `vouch digest` already made
+  (#478, #484).
 - approve/reject/expire record the audit event *before* moving the
   proposal to decided/. a crash between the two used to leave a durable
   decision with no authoritative history; it now leaves a pending
@@ -486,6 +508,14 @@ All notable changes to vouch are documented here. Format follows
 - demo: dual-path llm configuration — compile & summarize run through
   session-capture replay or directly against the api via a stdlib shim
   wired as `compile.llm_cmd` with a byo `ANTHROPIC_API_KEY`.
+- `vouch contradict-scan` — an offline scanner that groups approved claims
+  by shared entity and heuristically flags same-topic pairs that disagree
+  in polarity. `--dry-run` (default) only prints candidates; without it,
+  each surviving pair files a pending `contradicts` relation proposal via
+  `proposals.propose_relation` for a human `vouch approve` — the scanner
+  itself never writes a `Relation` or a `CONTESTED` status. `--threshold`,
+  `--entity`, and `--limit` tune the scan. scoring lives in the new
+  `src/vouch/contradictions.py`. (#314)
 
 ### Changed
 - ``kb.list_*`` JSONL/MCP responses now use a dict envelope
