@@ -112,6 +112,29 @@ def test_real_static_asset_is_served(console_dir: Path) -> None:
     assert "console.log" in res.text
 
 
+def test_index_is_revalidated_on_every_load(console_dir: Path) -> None:
+    """The SPA shell must never be served from cache without a revalidation.
+
+    index.html names the hashed bundle. With only Last-Modified on it a browser
+    applies heuristic freshness and keeps replaying the shell it saw before —
+    so after `pip install -U vouch-kb` a returning reviewer silently runs the
+    *previous* console build against the new backend, and any response shape
+    that changed in between crashes the render tree.
+    """
+    client = _loopback_client(build_console_app(console_dir))
+    for path in ("/", "/review"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert "no-cache" in res.headers.get("cache-control", ""), path
+
+
+def test_hashed_assets_stay_cacheable(console_dir: Path) -> None:
+    """Only the shell is revalidated — content-hashed assets are immutable."""
+    res = _loopback_client(build_console_app(console_dir)).get("/assets/app.js")
+    assert res.status_code == 200
+    assert "immutable" in res.headers.get("cache-control", "")
+
+
 # --- the /proxy bridge ------------------------------------------------------
 
 

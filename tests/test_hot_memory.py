@@ -135,6 +135,23 @@ def test_exclude_ids_filters_caller_supplied(store: KBStore) -> None:
     assert b in ids
 
 
+def test_exclude_ids_still_fills_limit(store: KBStore) -> None:
+    """exclude_ids must not shrink the sidebar below ``limit`` when more
+    eligible claims remain — search/context pass hit ids here so the
+    sidebar can surface *other* hot claims."""
+    ids = [_approved_claim(store, f"claim-{i}") for i in range(8)]
+    # Warm the unfiltered cache first so a buggy reuse of those rows
+    # would underfill after exclusions.
+    hot_mod.compute_hot_memory(store, limit=5)
+    rows = hot_mod.compute_hot_memory(
+        store, limit=5, exclude_ids=ids[-3:],
+    )
+    got = [r["id"] for r in rows]
+    assert len(got) == 5
+    assert not set(ids[-3:]) & set(got)
+    assert set(got) <= set(ids[:-3])
+
+
 def test_cache_returns_stale_within_ttl(store: KBStore) -> None:
     _approved_claim(store, "first claim")
     rows1 = hot_mod.compute_hot_memory(store, limit=5, now=1000.0)
@@ -333,6 +350,15 @@ def test_covered_methods_attach_sidebar_when_kb_has_recent_claims(
                        target="ent-b")
         store.put_relation(rel)
         params = {"relation_id": "rel-ab"}
+    elif method == "kb.read_evidence":
+        from vouch.models import Evidence
+        src = store.put_source(b"kafka retention is 7 days")
+        store.put_evidence(Evidence(id="ev-k", source_id=src.id, locator="L1",
+                                    quote="kafka retention is 7 days"))
+        params = {"evidence_id": "ev-k"}
+    elif method == "kb.read_source":
+        src = store.put_source(b"kafka broker config notes", title="kafka-notes")
+        params = {"source_id": src.id}
 
     resp = handle_request({"id": "cov", "method": method, "params": params})
     assert resp["ok"], resp

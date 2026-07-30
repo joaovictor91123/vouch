@@ -21,7 +21,7 @@ import hashlib
 import io
 import json
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ import yaml
 
 from . import audit
 from .models import Claim, Entity, Evidence, Proposal, Relation, Session, Source
-from .storage import KBStore, _deserialize_page, sha256_hex
+from .storage import KBStore, _deserialize_page, read_or_create_instance_id, sha256_hex
 
 MANIFEST_NAME = "manifest.json"
 SPEC_VERSION = "vouch-bundle-0.1"
@@ -44,6 +44,10 @@ EXPORT_SUBDIRS = (
     "sessions",
     "decided",
 )
+
+# The knowledge-only preset: what syncs to a hub. Sessions (agent/LLM
+# transcripts) and decided-proposal records never leave the machine.
+KNOWLEDGE_EXCLUDE = ("decided", "sessions")
 
 IMPORT_ROOT_FILES = {"config.yaml"}
 FORBIDDEN_SAFETY_FLAGS = {
@@ -67,9 +71,21 @@ VALIDATORS: dict[str, Any] = {
 # --- export ---------------------------------------------------------------
 
 
-def _iter_export_files(kb_dir: Path):
+_EXCLUDABLE = set(EXPORT_SUBDIRS) | {"config.yaml"}
+
+
+def _check_exclude(exclude: tuple[str, ...]) -> tuple[str, ...]:
+    bad = [e for e in exclude if e not in _EXCLUDABLE]
+    if bad:
+        raise ValueError(f"unknown exclude entries: {bad!r} (allowed: {sorted(_EXCLUDABLE)})")
+    return tuple(sorted(set(exclude)))
+
+
+def _iter_export_files(kb_dir: Path, exclude: tuple[str, ...] = ()):
     """Yield (relative path, absolute path) for every committable file."""
     for sub in EXPORT_SUBDIRS:
+        if sub in exclude:
+            continue
         root = kb_dir / sub
         if not root.is_dir():
             continue
@@ -77,14 +93,43 @@ def _iter_export_files(kb_dir: Path):
             if p.is_file():
                 yield p.relative_to(kb_dir), p
     cfg = kb_dir / "config.yaml"
-    if cfg.exists():
+    if cfg.exists() and "config.yaml" not in exclude:
         yield cfg.relative_to(kb_dir), cfg
 
 
-def build_manifest(kb_dir: Path) -> dict[str, Any]:
+def _strip_identity(body: bytes) -> bytes:
+    """config.yaml bytes without the `kb:` identity block.
+
+    Identity is per-KB and travels in the manifest's own `kb` field; the
+    config.yaml inside a bundle transfers *settings*. Without this, every
+    import would flag config.yaml as a conflict (ids always differ), and an
+    overwrite-import would re-identify the destination KB as the source.
+    """
+    try:
+        loaded = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return body
+    if not isinstance(loaded, dict) or "kb" not in loaded:
+        return body
+    stripped = dict(loaded)
+    stripped.pop("kb", None)
+    return _yaml_dump(stripped).encode("utf-8")
+
+
+def _export_file_bytes(rel: Path, abs_path: Path) -> bytes:
+    data = abs_path.read_bytes()
+    if rel.as_posix() == "config.yaml":
+        return _strip_identity(data)
+    return data
+
+
+def build_manifest(
+    kb_dir: Path, exclude: tuple[str, ...] = (), *, kb_id: str | None = None
+) -> dict[str, Any]:
+    exclude = _check_exclude(exclude)
     files: list[dict[str, Any]] = []
-    for rel, abs_path in _iter_export_files(kb_dir):
-        data = abs_path.read_bytes()
+    for rel, abs_path in _iter_export_files(kb_dir, exclude):
+        data = _export_file_bytes(rel, abs_path)
         files.append(
             {
                 # tarfile member names use POSIX `/` on every platform; the
@@ -100,13 +145,20 @@ def build_manifest(kb_dir: Path) -> dict[str, Any]:
     h = hashlib.sha256()
     for f in sorted(files, key=lambda f: f["path"]):
         h.update(f["sha256"].encode())
+    # Origin-KB identity (config.yaml `kb:`): keeps exported artifacts
+    # attributable to the KB that vouched for them. Absent for
+    # pre-identity KBs; additive, so older importers ignore it.
+    identity = KBStore(kb_dir.parent).identity()
     return {
         "spec": SPEC_VERSION,
         "bundle_id": h.hexdigest(),
+        "kb_id": kb_id,
+        "kb": {"id": identity[0], "name": identity[1]} if identity else None,
         "files": files,
         "counts": {
             sub: sum(1 for f in files if f["path"].startswith(f"{sub}/")) for sub in EXPORT_SUBDIRS
         },
+        "excluded": list(exclude),
         "safety": {
             "has_proposed": False,
             "has_state_db": False,
@@ -132,12 +184,24 @@ def fenced_bundle_path(store: KBStore, raw: str) -> Path:
     return Path(raw)
 
 
-def export(kb_dir: Path, *, dest: Path, actor: str = "vouch-export") -> dict[str, Any]:
-    manifest = build_manifest(kb_dir)
+def export(
+    kb_dir: Path,
+    *,
+    dest: Path,
+    actor: str = "vouch-export",
+    exclude: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    exclude = _check_exclude(exclude)
+    manifest = build_manifest(kb_dir, exclude, kb_id=read_or_create_instance_id(kb_dir))
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(dest, "w:gz") as tar:
-        for rel, abs_path in _iter_export_files(kb_dir):
-            tar.add(abs_path, arcname=rel.as_posix())
+        for rel, abs_path in _iter_export_files(kb_dir, exclude):
+            # addfile from bytes (not tar.add) so config.yaml lands
+            # identity-stripped, matching its manifest hash.
+            data = _export_file_bytes(rel, abs_path)
+            member = tarfile.TarInfo(rel.as_posix())
+            member.size = len(data)
+            tar.addfile(member, io.BytesIO(data))
         manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode()
         info = tarfile.TarInfo(MANIFEST_NAME)
         info.size = len(manifest_bytes)
@@ -147,7 +211,7 @@ def export(kb_dir: Path, *, dest: Path, actor: str = "vouch-export") -> dict[str
         event="bundle.export",
         actor=actor,
         object_ids=[manifest["bundle_id"]],
-        data={"dest": str(dest), "files": len(manifest["files"])},
+        data={"dest": str(dest), "files": len(manifest["files"]), "excluded": list(exclude)},
     )
     return manifest
 
@@ -158,6 +222,9 @@ class ExportCheckResult:
     bundle_id: str
     files_checked: int
     issues: list[str]
+    # From the manifest (empty for pre-filter bundles without the keys):
+    counts: dict[str, int] = field(default_factory=dict)
+    excluded: list[str] = field(default_factory=list)
 
 
 def _unsafe_name_reason(name: str) -> str | None:
@@ -213,6 +280,8 @@ def export_check(bundle_path: Path) -> ExportCheckResult:
             return ExportCheckResult(False, "", 0, ["missing manifest.json"])
         manifest = json.loads(tar.extractfile(mf_member).read().decode())  # type: ignore[union-attr]
         bundle_id = manifest.get("bundle_id", "")
+        counts = manifest.get("counts", {})
+        excluded = manifest.get("excluded", [])
         recorded = {f["path"]: f for f in manifest["files"]}
         for path in recorded:
             reason = _unsafe_name_reason(path)
@@ -246,6 +315,8 @@ def export_check(bundle_path: Path) -> ExportCheckResult:
         bundle_id=bundle_id,
         files_checked=files_checked,
         issues=issues,
+        counts=counts,
+        excluded=excluded,
     )
 
 
@@ -517,6 +588,76 @@ def _check_source_content_address(path: str, body: bytes, issues: list[str]) -> 
             )
 
 
+def _config_settings(body: bytes) -> dict[str, Any] | None:
+    """Parsed config mapping minus the `kb:` identity block; None if unparseable."""
+    try:
+        loaded = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    settings = dict(loaded)
+    settings.pop("kb", None)
+    return settings
+
+
+def _dest_matches(
+    path: str,
+    dest_bytes: bytes,
+    expected_sha: str | None,
+    bundle_bytes: bytes | None = None,
+) -> bool:
+    """Does the destination file already carry the bundled content?
+
+    config.yaml is compared modulo the `kb:` identity block, structurally on
+    BOTH sides when the bundle member's bytes are in hand — so two KBs with
+    the same settings but their own identities (or their own comments /
+    formatting / a pre-identity exporter) read as identical, not
+    conflicting, and an overwrite-import converges instead of reporting the
+    same conflict forever.
+    """
+    if sha256_hex(dest_bytes) == expected_sha:
+        return True
+    if path != "config.yaml":
+        return False
+    if sha256_hex(_strip_identity(dest_bytes)) == expected_sha:
+        return True
+    if bundle_bytes is None:
+        return False
+    dest_settings = _config_settings(dest_bytes)
+    bundle_settings = _config_settings(bundle_bytes)
+    return dest_settings is not None and dest_settings == bundle_settings
+
+
+def _merged_config_preserving_identity(dest: Path, body: bytes) -> bytes | None:
+    """Bundle config bytes with the destination KB's own identity kept.
+
+    A bundle import moves settings and artifacts, never identity: the
+    destination's `kb:` block survives, and a (legacy) bundle-borne `kb:`
+    block is dropped rather than adopted. Returns None when the destination
+    config exists but cannot be parsed — its identity may be latent in the
+    bytes, so the caller must skip the write and leave the file for the
+    user to repair rather than overwrite it.
+    """
+    try:
+        incoming = yaml.safe_load(body.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return body
+    if not isinstance(incoming, dict):
+        return body
+    incoming.pop("kb", None)
+    if dest.exists():
+        try:
+            existing = yaml.safe_load(dest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return None
+        if existing is not None and not isinstance(existing, dict):
+            return None
+        if isinstance(existing, dict) and isinstance(existing.get("kb"), dict):
+            incoming["kb"] = existing["kb"]
+    return _yaml_dump(incoming).encode("utf-8")
+
+
 def import_check(kb_dir: Path, bundle_path: Path) -> ImportCheckResult:
     """Diff a bundle against the destination KB without writing anything."""
     new_files: list[str] = []
@@ -548,18 +689,6 @@ def import_check(kb_dir: Path, bundle_path: Path) -> ImportCheckResult:
                 "bundle carries decided/ members that cannot be imported past "
                 f"the review gate: {decided_members[0]}"
             )
-        for f in manifest["files"]:
-            try:
-                dest = _safe_member_path(kb_dir, f["path"])
-            except RuntimeError as exc:
-                issues.append(str(exc))
-                continue
-            if not dest.exists():
-                new_files.append(f["path"])
-            elif sha256_hex(dest.read_bytes()) == f.get("sha256"):
-                identical.append(f["path"])
-            else:
-                conflicts.append(f["path"])
         for member in tar.getmembers():
             if member.name == MANIFEST_NAME or not member.isfile():
                 continue
@@ -583,6 +712,23 @@ def import_check(kb_dir: Path, bundle_path: Path) -> ImportCheckResult:
                 tar.getmember(path)
             except KeyError:
                 issues.append(f"manifest lists missing file: {path}")
+        # Classify after extraction so config.yaml can be compared
+        # structurally against the actual member bytes (see _dest_matches).
+        for f in manifest["files"]:
+            try:
+                dest = _safe_member_path(kb_dir, f["path"])
+            except RuntimeError as exc:
+                issues.append(str(exc))
+                continue
+            if not dest.exists():
+                new_files.append(f["path"])
+            elif _dest_matches(
+                f["path"], dest.read_bytes(), f.get("sha256"),
+                bundle_bytes=incoming.get(f["path"]),
+            ):
+                identical.append(f["path"])
+            else:
+                conflicts.append(f["path"])
     # Graph-integrity pass: the storage layer's put_relation / put_page
     # validators run on direct writes, but import_apply writes member
     # bytes straight to disk, so the only place to enforce referential
@@ -635,14 +781,6 @@ def import_apply(
                 continue
             dest = _safe_member_path(kb_dir, member.name)
             expected_sha = recorded[member.name].get("sha256")
-            if (
-                dest.exists()
-                and on_conflict == "skip"
-                and sha256_hex(dest.read_bytes()) != expected_sha
-            ):
-                skipped.append(member.name)
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
             body = tar.extractfile(member).read()  # type: ignore[union-attr]
             # Re-verify the manifest sha256 at write time as defence in
             # depth against a TOCTOU between import_check (which already
@@ -655,11 +793,35 @@ def import_apply(
                 raise RuntimeError(
                     f"refusing to import: hash mismatch at write time: {member.name}"
                 )
+            if dest.exists():
+                if _dest_matches(
+                    member.name, dest.read_bytes(), expected_sha, bundle_bytes=body
+                ):
+                    # Already carries this content (reported by import_check
+                    # as identical). Never rewrite: for config.yaml a
+                    # rewrite would normalize away the destination's
+                    # comments and formatting for zero content gain.
+                    continue
+                if on_conflict == "skip":
+                    skipped.append(member.name)
+                    continue
             val_issues: list[str] = []
             _validate_content(member.name, body, val_issues)
             if val_issues:
                 skipped.append(member.name)
                 continue
+            if member.name == "config.yaml":
+                # after hash verification, before write: settings move,
+                # identity never does.
+                merged = _merged_config_preserving_identity(dest, body)
+                if merged is None:
+                    # dest config exists but is unparseable — its identity
+                    # may be latent in the bytes; leave it for the user to
+                    # repair instead of overwriting.
+                    skipped.append(member.name)
+                    continue
+                body = merged
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(body)
             written.append(member.name)
     result = {
@@ -683,5 +845,175 @@ def import_apply(
     return result
 
 
-def _yaml_dump(obj: Any) -> str:  # pragma: no cover — kept for symmetry
+def _manifest_kb_id(bundle_path: Path) -> str | None:
+    """The exporting KB's instance id, if the bundle manifest carries one.
+
+    Older bundles predate `kb_id`; returns None so the caller can fall back to an
+    explicitly-supplied origin.
+    """
+    try:
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            raw = tar.extractfile(tar.getmember(MANIFEST_NAME)).read()  # type: ignore[union-attr]
+        manifest = json.loads(raw.decode())
+    except (OSError, tarfile.TarError, KeyError, json.JSONDecodeError):
+        return None
+    kb_id = manifest.get("kb_id")
+    return str(kb_id) if kb_id else None
+
+
+def inbound_claim_id(claim_bytes: bytes) -> str:
+    """The id of an inbound claim (raw claim yaml), for failure reporting."""
+    from .models import Claim
+
+    return Claim.model_validate(yaml.safe_load(claim_bytes)).id
+
+
+def propose_inbound_claim(store: Any, claim_bytes: bytes, *, origin: str, actor: str) -> str:
+    """File one inbound claim (raw claim yaml) as a pending proposal.
+
+    Shared by the two gated receive paths -- bundle import and sync -- so both
+    stamp identical provenance: the proposing ``actor`` and an ``origin:<kb>``
+    tag that survives approval. Propagates ``proposals.ProposalError`` (e.g. a
+    claim that cannot cite a resolvable source) so the caller can record it as a
+    failure rather than dropping it silently. Returns the pending proposal's id.
+    """
+    from . import proposals as _proposals
+    from .models import Claim
+
+    claim = Claim.model_validate(yaml.safe_load(claim_bytes))
+    tags = list(claim.tags)
+    origin_tag = f"origin:{origin}"
+    if origin_tag not in tags:
+        tags.append(origin_tag)
+    res = _proposals.propose_claim(
+        store,
+        text=claim.text,
+        evidence=list(claim.evidence),
+        proposed_by=actor,
+        claim_type=claim.type.value,
+        confidence=claim.confidence,
+        entities=list(claim.entities),
+        tags=tags,
+        slug_hint=claim.id,
+        rationale=(
+            f"imported from KB '{origin}' via gated import; review before it "
+            "becomes durable knowledge here"
+        ),
+    )
+    return res.proposal.id
+
+
+def import_as_proposals(
+    kb_dir: Path,
+    bundle_path: Path,
+    *,
+    origin_kb: str | None = None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Land a bundle's knowledge as PENDING PROPOSALS, never as committed writes.
+
+    The gated counterpart to `import_apply`. Instead of writing claims straight
+    into the decided store, every inbound claim is filed as a pending claim
+    proposal via `proposals.propose_claim`, so nothing lands without passing this
+    KB's own `proposals.approve()` -- the receiving-side gate the federation
+    invariant requires (ROADMAP.md step 10: "any data path that lands writes
+    without a receiving-side proposal is wrong").
+
+    Sources and evidence -- raw substrate, not vouched knowledge -- are
+    registered directly (the same shape `inbox.scan` uses before it proposes a
+    page), because a claim proposal must be able to cite them. Provenance is
+    preserved: the proposing actor names the origin KB and each proposed claim
+    carries an ``origin:<kb>`` tag that survives approval, so a reviewer -- and
+    the approved claim -- can always see which KB vouched for it.
+
+    Pages, entities and relations are reported under ``deferred`` rather than
+    silently dropped: filing them as proposals needs claim/entity ids that are
+    themselves still pending, which is follow-up work -- a silent skip would read
+    as "imported everything".
+    """
+    # Local imports: proposals/storage import from this module's siblings, and a
+    # top-level import here would risk a cycle at package load.
+    from . import proposals as _proposals
+    from .models import Evidence
+    from .storage import KBStore
+
+    check = import_check(kb_dir, bundle_path)
+    if check.issues:
+        raise RuntimeError(f"refusing to import: {check.issues[0]}")
+
+    origin = origin_kb or _manifest_kb_id(bundle_path) or "unknown"
+    proposing_actor = actor or f"hub:{origin}"
+    store = KBStore(kb_dir.parent)
+
+    proposed: list[str] = []
+    failed: list[dict[str, str]] = []
+    sources_registered = 0
+    evidence_registered = 0
+    deferred = {"pages": 0, "entities": 0, "relations": 0}
+
+    with tarfile.open(bundle_path, "r:gz") as tar:
+        members = [m for m in tar.getmembers() if m.isfile() and m.name != MANIFEST_NAME]
+
+        # Pass 1: register substrate so claim proposals can cite it.
+        contents: dict[str, bytes] = {}
+        for m in members:
+            if m.name.startswith("sources/") and m.name.endswith("/content"):
+                sha = m.name.split("/")[1]
+                contents[sha] = tar.extractfile(m).read()  # type: ignore[union-attr]
+        for _sha, body in sorted(contents.items()):
+            store.put_source(body)
+            sources_registered += 1
+        for m in members:
+            if m.name.startswith("evidence/") and m.name.endswith(".yaml"):
+                ev = Evidence.model_validate(
+                    yaml.safe_load(tar.extractfile(m).read())  # type: ignore[union-attr]
+                )
+                store.put_evidence(ev)
+                evidence_registered += 1
+
+        # Pass 2: file each inbound claim as a PENDING proposal.
+        for m in members:
+            if m.name.startswith("claims/") and m.name.endswith(".yaml"):
+                body = tar.extractfile(m).read()  # type: ignore[union-attr]
+                try:
+                    proposed.append(
+                        propose_inbound_claim(store, body, origin=origin, actor=proposing_actor)
+                    )
+                except _proposals.ProposalError as e:
+                    # One un-citable claim must not sink the whole import; record
+                    # it rather than abort (and never silently drop it).
+                    failed.append({"claim": inbound_claim_id(body), "error": str(e)})
+            elif m.name.startswith("pages/"):
+                deferred["pages"] += 1
+            elif m.name.startswith("entities/"):
+                deferred["entities"] += 1
+            elif m.name.startswith("relations/"):
+                deferred["relations"] += 1
+
+    audit.log_event(
+        kb_dir,
+        event="bundle.import_proposals",
+        actor=proposing_actor,
+        object_ids=[check.bundle_id],
+        data={
+            "origin_kb": origin,
+            "proposed": len(proposed),
+            "failed": len(failed),
+            "sources": sources_registered,
+            "evidence": evidence_registered,
+            "deferred": deferred,
+        },
+    )
+    return {
+        "bundle_id": check.bundle_id,
+        "origin_kb": origin,
+        "proposed": proposed,
+        "failed": failed,
+        "sources_registered": sources_registered,
+        "evidence_registered": evidence_registered,
+        "deferred": deferred,
+    }
+
+
+def _yaml_dump(obj: Any) -> str:
     return yaml.safe_dump(obj, sort_keys=False, allow_unicode=True)

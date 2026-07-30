@@ -38,6 +38,9 @@ def _set_rerank(store: KBStore, *, enabled: bool, top_k: int | None = None) -> N
     if top_k is not None:
         rerank_cfg["top_k"] = top_k
     cfg.setdefault("retrieval", {})["rerank"] = rerank_cfg
+    # these tests assert the rerank stage in isolation; the shipped champion
+    # strategy is final-say and would re-sort the window, so opt out here.
+    cfg["retrieval"]["strategy"] = None
     store.config_path.write_text(yaml.safe_dump(cfg))
 
 
@@ -374,7 +377,7 @@ def _set_recency(
     store.config_path.write_text(yaml.safe_dump(cfg))
 
 
-def _backdate_claim(store: KBStore, claim_id: str, *, days: int) -> None:
+def _backdate_claim(store: KBStore, claim_id: str, *, days: float) -> None:
     from datetime import UTC, datetime, timedelta
 
     path = store.kb_dir / "claims" / f"{claim_id}.yaml"
@@ -436,6 +439,115 @@ def test_recency_disabled_keeps_fused_order(
 
     assert [item["id"] for item in pack["items"]] == ["c1", "c2"]
     assert pack["retrieval"]["recency"] is False
+
+
+def test_recency_sub_day_half_life_uses_fractional_age(
+    two_claim_store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-day half-life must not be defeated by whole-day quantization.
+
+    Session-scale recency (half-life measured in minutes) is an explicit
+    opt-in; truncating same-day ages to zero silently turned the whole
+    stage into a no-op for it."""
+    _two_claim_fts(monkeypatch)
+    _set_backend(two_claim_store, "hybrid")
+    _set_recency(two_claim_store, enabled=True, half_life_days=0.001)
+    _backdate_claim(two_claim_store, "c1", days=0.02)  # ~29 minutes old
+
+    pack = context.build_context_pack(two_claim_store, query="JWT", limit=2)
+
+    assert [item["id"] for item in pack["items"]] == ["c2", "c1"]
+
+
+def test_recency_applies_on_fts5_backend(
+    two_claim_store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backend parity: the recency opt-in works on the pure-fts5 path too,
+    not only on hybrid."""
+    _two_claim_fts(monkeypatch)
+    _set_backend(two_claim_store, "fts5")
+    _set_recency(two_claim_store, enabled=True, half_life_days=90)
+    _backdate_claim(two_claim_store, "c1", days=365)
+
+    pack = context.build_context_pack(two_claim_store, query="JWT", limit=2)
+
+    assert [item["id"] for item in pack["items"]] == ["c2", "c1"]
+    assert pack["backend"] == "fts5"
+
+
+def _set_pages_first(store: KBStore, *, enabled: bool, boost: float | None = None) -> None:
+    cfg = yaml.safe_load(store.config_path.read_text())
+    pf_cfg: dict = {"enabled": enabled}
+    if boost is not None:
+        pf_cfg["boost"] = boost
+    cfg.setdefault("retrieval", {})["pages_first"] = pf_cfg
+    store.config_path.write_text(yaml.safe_dump(cfg))
+
+
+def _page_and_claim_fts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic ranking: claim narrowly above page, no embeddings."""
+    monkeypatch.setattr(context.index_db, "search_semantic", lambda *a, **k: [])
+    monkeypatch.setattr(
+        context.index_db, "search",
+        lambda *a, **k: [
+            ("claim", "c1", "JWT token rotation", 1.0),
+            ("page", "p1", "JWT rotation policy", 0.9),
+        ],
+    )
+
+
+@pytest.fixture
+def page_claim_store(tmp_path: Path) -> KBStore:
+    from vouch.models import Page
+
+    s = KBStore.init(tmp_path)
+    src = s.put_source(b"e")
+    s.put_claim(Claim(id="c1", text="JWT token rotation", evidence=[src.id]))
+    s.put_page(Page(id="p1", title="JWT rotation policy", body="b", type="concept"))
+    health.rebuild_index(s)
+    return s
+
+
+def test_pages_first_boosts_topic_pages(
+    page_claim_store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _page_and_claim_fts(monkeypatch)
+    _set_backend(page_claim_store, "hybrid")
+    _set_pages_first(page_claim_store, enabled=True, boost=1.5)
+
+    pack = context.build_context_pack(page_claim_store, query="JWT", limit=2)
+
+    assert [item["id"] for item in pack["items"]] == ["p1", "c1"]
+
+
+def test_pages_first_disabled_keeps_order(
+    page_claim_store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _page_and_claim_fts(monkeypatch)
+    _set_backend(page_claim_store, "hybrid")
+
+    pack = context.build_context_pack(page_claim_store, query="JWT", limit=2)
+
+    assert [item["id"] for item in pack["items"]] == ["c1", "p1"]
+
+
+def test_pages_first_never_boosts_session_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch.models import Page
+
+    s = KBStore.init(tmp_path)
+    src = s.put_source(b"e")
+    s.put_claim(Claim(id="c1", text="JWT token rotation", evidence=[src.id]))
+    s.put_page(Page(id="p1", title="JWT rotation policy", body="b", type="session"))
+    health.rebuild_index(s)
+    _page_and_claim_fts(monkeypatch)
+    _set_backend(s, "hybrid")
+    _set_pages_first(s, enabled=True, boost=5.0)
+
+    pack = context.build_context_pack(s, query="JWT", limit=2)
+
+    assert [item["id"] for item in pack["items"]] == ["c1", "p1"]
 
 
 # --- search_kb: the one shared kb.search implementation ----------------------
