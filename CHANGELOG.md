@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **digest drops archived followup pages** (#625):
+  `followups_due` already skipped `done`/`dropped` metadata, but an
+  `ARCHIVED` page with `followup_status=open` and a past `due_at` still
+  appeared every morning — stale claims were filtered, pages were not.
+  mirror recall: archived followups leave the due list.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
