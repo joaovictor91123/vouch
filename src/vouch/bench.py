@@ -32,7 +32,7 @@ local, LLM-free harness:
   half of a head-to-head lives in ``memory_contract.MemoryContract``, the
   five-tool (Ditto-contract) adapter over the same store.
 * **Derivation axes.** Four categories ask for a fact stated in no single
-  claim: passive-consolidation (parts of a whole, each in its own session),
+  claim: passive-consolidation (parts of a whole, spread across sessions),
   multi-hop-relational (a three-link chain the question names no link of),
   temporal-depth (a value's whole history, not its current value), and
   aggregation (list-all over separately stated members). Because the answer
@@ -518,10 +518,12 @@ def generate(seed: int, *, sessions: int = DEFAULT_SESSIONS) -> Dataset:
                 out.append(word)
         return out
 
-    # 11. passive-consolidation: each part of a whole is stated in its own
-    # session and the whole is never stated. Answering needs all of them at
-    # once, which is what a compiled page can do and a raw-claim pack cannot
-    # inside the same budget. The direct W3 measurement.
+    # 11. passive-consolidation: the parts of a whole are spread across
+    # sessions — one each while the session count allows, sharing sessions
+    # below that — and the whole is never stated. What the grading rests on is
+    # that no single session carries every part, so answering needs all of them
+    # at once: what a compiled page can do and a raw-claim pack cannot inside
+    # the same budget. The direct W3 measurement.
     subject, asks, parts = sub.choice(_COMPOSITE_SUBJECTS)
     values = coin_distinct(len(parts))
     for idx, part, value in zip(sub_spread(len(parts)), parts, values, strict=True):
@@ -545,9 +547,11 @@ def generate(seed: int, *, sessions: int = DEFAULT_SESSIONS) -> Dataset:
         required=(mid, svc, end),
     ))
 
-    # 13. temporal-depth: three values in chronological order. Unlike
-    # point-in-time (one prior value) the question is about the history, so a
-    # pack that keeps only the current value scores zero.
+    # 13. temporal-depth: one value per _HISTORY_TEMPLATES entry, in
+    # chronological order — four today, and the count follows the templates
+    # rather than being fixed here. Unlike point-in-time (one prior value) the
+    # question is about the history, so a pack that keeps only the current
+    # value scores zero.
     hist_attr, hist_asks = sub.choice(_HISTORY_ATTRIBUTES)
     hist_values = coin_distinct(len(_HISTORY_TEMPLATES))
     for idx, template, value in zip(

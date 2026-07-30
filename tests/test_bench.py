@@ -9,7 +9,15 @@ import pytest
 from click.testing import CliRunner
 
 from vouch import bench, health, lifecycle
-from vouch.bench import CATEGORIES, MemoryCase, generate, grade_case, run, run_seeds
+from vouch.bench import (
+    CATEGORIES,
+    DEFAULT_SESSIONS,
+    MemoryCase,
+    generate,
+    grade_case,
+    run,
+    run_seeds,
+)
 from vouch.cli import cli
 from vouch.context import build_context_pack
 from vouch.extract import ingest_source
@@ -275,19 +283,30 @@ def test_derivation_cases_state_no_answer_only_parts() -> None:
         assert len(set(case.required)) == len(case.required), case.category
 
 
-def test_derivation_parts_are_planted_in_separate_sessions() -> None:
-    """Every required part is in the corpus, and no session holds them all."""
-    dataset = generate(4)
-    bodies = [text for _title, text in dataset.sessions]
-    corpus = "\n".join(bodies)
-    for case in dataset.cases:
-        if case.category not in _DERIVATION_CATEGORIES:
-            continue
-        for part in case.required:
-            assert part in corpus, (case.category, part)
-        assert not any(
-            all(part in body for part in case.required) for body in bodies
-        ), f"{case.category} is answerable from one session"
+def test_derivation_parts_are_never_answerable_from_one_session() -> None:
+    """Every required part is in the corpus, and no session holds them all.
+
+    Deliberately not "one part per session": ``sub_spread`` only keeps the
+    parts in distinct sessions while the session count allows, and a five-part
+    case under ``sessions=4`` shares. What the category actually needs is the
+    weaker property asserted here — that no single session answers the
+    question on its own.
+    """
+    # sessions=3 crowds five parts into fewer sessions than parts, which is
+    # where sub_spread stops being able to keep them distinct — the invariant
+    # has to survive there, not just at the roomy default.
+    for sessions in (DEFAULT_SESSIONS, 4, 3):
+        dataset = generate(4, sessions=sessions)
+        bodies = [text for _title, text in dataset.sessions]
+        corpus = "\n".join(bodies)
+        for case in dataset.cases:
+            if case.category not in _DERIVATION_CATEGORIES:
+                continue
+            for part in case.required:
+                assert part in corpus, (sessions, case.category, part)
+            assert not any(
+                all(part in body for part in case.required) for body in bodies
+            ), f"{case.category} is answerable from one session at {sessions=}"
 
 
 def test_derivation_answer_key_is_a_pure_function_of_the_seed() -> None:
