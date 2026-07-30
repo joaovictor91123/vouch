@@ -107,6 +107,44 @@ def test_archived_page_reports_status_filtered(store: KBStore) -> None:
     )
 
 
+def test_status_filtered_claim_does_not_carry_its_summary(store: KBStore) -> None:
+    """The gate that hid a candidate is reported; the text behind it is not.
+
+    `kb.search` excludes a retracted/superseded/redacted claim entirely, so
+    `kb.explain_ranking` must not hand its text back through the summary
+    just because it still carries the correct `status-filtered` gate.
+    """
+    secret = "jwt legacy signing key is hunter2-example-retracted"
+    store.put_claim(Claim(
+        id="c-dead", text=secret,
+        evidence=[store.list_sources()[0].id], status=ClaimStatus.SUPERSEDED,
+    ))
+    health.rebuild_index(store)
+
+    result = er.explain_ranking(store, query="jwt", limit=5)
+    cand = _by_id(result)["c-dead"]
+
+    assert cand["gate"] == "status-filtered"
+    assert cand["summary"] == ""
+    assert "hunter2-example-retracted" not in json.dumps(result)
+
+
+def test_status_filtered_page_does_not_carry_its_summary(store: KBStore) -> None:
+    secret = "jwt legacy design notes: hunter2-example-retracted"
+    store.put_page(Page(
+        id="p-arch", title="jwt legacy design", body=secret,
+        type=PageType.CONCEPT, status=PageStatus.ARCHIVED,
+    ))
+    health.rebuild_index(store)
+
+    result = er.explain_ranking(store, query="jwt", limit=5)
+    cand = _by_id(result)["p-arch"]
+
+    assert cand["gate"] == "status-filtered"
+    assert cand["summary"] == ""
+    assert "hunter2-example-retracted" not in json.dumps(result)
+
+
 def test_truncated_candidate_reports_limit_dropped(store: KBStore) -> None:
     """A candidate lost to the window is attributed to `limit`, not the filters."""
     result = er.explain_ranking(store, query="jwt", limit=1)
