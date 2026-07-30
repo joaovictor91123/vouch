@@ -49,14 +49,6 @@ The same argument as a picture — at one writer the two are the same thing; the
 
 So the honest pitch: **vouch is not a better place to put memory — it's a review gate in front of one, and a wiki on the other side of it.** If you're solo and happy, one prompt is genuinely fine; vouch's session capture runs passively alongside whatever your host already remembers, rather than replacing it. But once a fleet of agents writes to shared knowledge — or a team does — that pile of notes needs an editor, and an editor is not something you can prompt your way to. The case in full: [docs/review-gate.md](docs/review-gate.md).
 
-## Watch it work (110 seconds)
-
-[![vouch demo — capture, summarize, approve, compile, recall](docs/img/how-it-works-preview.gif)](docs/vouch-how-it-works.mp4)
-
-**capture → summarize → approve → compile → recall.** Captured live from the review console, no mockups — the preview above is muted and 3× speed; the full cut is **[▶ docs/vouch-how-it-works.mp4](docs/vouch-how-it-works.mp4)**. A Claude Code session captures itself, an LLM summarizes what the session *meant*, a human approves it at the gate, **`vouch compile`** distills the approved claims into cited topic pages (every `[claim: …]` citation machine-verified, still gated), and the film closes on real `vouch recall` output — the wiki the video just built, injected into the next session's first turn.
-
-Everything below exists to reproduce that loop on your own project.
-
 ## Install
 
 **For the full UI experience** (recommended first time):
@@ -131,7 +123,9 @@ vouch install-mcp claude-code       # creates .vouch/ (if missing) + wires Claud
 
 > **What you'll see.** Every prompt is checked against the KB first. When vouch knows something relevant, the answer opens with **"From vouch memory:"**, grounded in the cited items; when it doesn't, it opens with *"Nothing in vouch on this."* — recall is visible on every turn, never silent. (A fresh KB knows almost nothing yet: work a session or two so capture fills it, then ask about the project again.)
 
-> **Prefer one install for every project?** `vouch install-mcp claude-code --global` wires vouch once, machine-wide: user-level hooks and commands in `~/.claude/` plus a user-scope MCP server in `~/.claude.json`. Every Claude session in every folder then captures + recalls into *that folder's own* `.vouch/` — data stays per project. Run `vouch init` once in each project you want vouch in; a folder without a KB never captures anywhere — its session opens with a one-line "run `vouch init` to enable durable memory here" note and the `kb_*` tools say the same. Safe next to existing per-project installs: duplicate hooks collapse and capture dedups by event id.
+> **Prefer one install for every project?** `vouch install-mcp claude-code --global` wires vouch once, machine-wide: user-level hooks and commands in `~/.claude/` plus a user-scope MCP server in `~/.claude.json`. Every Claude session in every folder then captures + recalls into *that folder's own* `.vouch/` — data stays per project. Run `vouch init` once in each project you want vouch in; by default a folder without a KB never captures anywhere — its session opens with a one-line "run `vouch init` to enable durable memory here" note and the `kb_*` tools say the same. Safe next to existing per-project installs: duplicate hooks collapse and capture dedups by event id.
+
+> **Optionally, a personal catch-all KB.** The global install asks one question (or pass `--personal-fallback`; later: `vouch hub init-personal --fallback`): opt in, and folders *without* a project KB capture into a personal KB at `~/.local/share/vouch/personal` instead of nowhere — each captured source stamped with the folder it came from, and the session banner saying exactly where the knowledge is going. It is **one store shared by every KB-less folder**: recall in any of them reads the whole personal KB, so knowledge captured while working in one such folder can surface in another (the injected block says so). Projects with their own `.vouch/` are never affected. When such a folder later becomes a real project, `vouch init` + **`vouch adopt`** moves its captures into the new project KB *through that KB's own review gate*: sources copy byte-identically, every claim is re-proposed and its byte-offset receipt re-verified, and the project's review config decides durability — adoption never bypasses review. Strictly opt-in; without it, nothing changes.
 
 **2. Point `compile` at an LLM** — the only step that needs a model. In `.vouch/config.yaml`:
 
@@ -221,6 +215,7 @@ Pending drafts (`proposed/`) and the derived search index (`state.db`) are gitig
 * `vouch install-mcp <host>` also wires cursor, codex, zed, windsurf, openclaw and friends ([adapters/](adapters/))
 * [vouch webapp](https://github.com/vouchdev/webApp) — the chat-first browser console from the video; [vouch-desktop](https://github.com/vouchdev/vouch-desktop) wraps the same loop as a desktop app
 * [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and the test gate
+* [docs/mining-on-vouch.md](docs/mining-on-vouch.md) — get paid to improve the retrieval engine: submit ranking code, scored by a reproducible benchmark; the best verified strategy ships as the default
 
 ## Incubated by Gittensor
 

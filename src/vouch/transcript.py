@@ -312,6 +312,16 @@ def parse_codex_transcript(path: Path, *, max_messages: int = 2000) -> dict[str,
                     session["git_branch"] = git["branch"]
                 continue
 
+            # codex records the turn's model on `turn_context`, not on
+            # `session_meta`, so without this the normalized transcript's model
+            # is always none for codex while the claude parser fills it. first
+            # non-empty wins (the model can change across turns; keep the first).
+            if rtype == "turn_context":
+                model = payload.get("model")
+                if isinstance(model, str) and model.strip() and session["model"] is None:
+                    session["model"] = model.strip()
+                continue
+
             if rtype != "response_item":
                 continue
             if len(messages) >= max_messages:
@@ -364,19 +374,26 @@ def parse_codex_transcript(path: Path, *, max_messages: int = 2000) -> dict[str,
     return {"session": session, "messages": messages, "truncated": truncated}
 
 
-def _degraded(store: KBStore, session_id: str, reason: str) -> dict[str, Any]:
-    obs = _read_observations(buffer_path(store, session_id))
+def _degraded(store: KBStore | None, session_id: str, reason: str) -> dict[str, Any]:
+    # No KB resolved: the raw transcript lives outside `.vouch/`, so the
+    # lookup still answers — there is just no capture buffer to fall back on.
+    obs = _read_observations(buffer_path(store, session_id)) if store is not None else []
     return {"available": False, "reason": reason, "observations": obs}
 
 
 def load_transcript(
-    store: KBStore, session_id: str, *, agent: str | None = None
+    store: KBStore | None, session_id: str, *, agent: str | None = None
 ) -> dict[str, Any]:
     """Locate + parse the raw transcript for ``session_id``.
 
     ``agent`` restricts the search ("claude" | "codex"); when None both are
     tried. Returns the normalized schema on success, or a degraded result
     (compact capture observations) when the raw file is missing/too large.
+
+    ``store`` may be None when no KB resolves from the caller's cwd. The raw
+    transcript is read from the agent's own directory, not from the KB, so the
+    normalized result is unaffected; only the degraded path loses its
+    observations.
     """
     path: Path | None = None
     source_agent = ""

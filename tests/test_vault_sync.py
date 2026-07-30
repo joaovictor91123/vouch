@@ -105,19 +105,102 @@ def test_kb_to_vault_creates_claim_stubs_with_backlinks(
     assert "alpha-page" in text
 
 
-def test_kb_to_vault_skips_draft_pages(tmp_path: Path, vault: Path) -> None:
-    """Mirror is for *approved* artifacts only -- a draft has not been
-    through the review gate and must not leak into the vault."""
+def test_kb_to_vault_mirrors_draft_pages(tmp_path: Path, vault: Path) -> None:
+    """Durable pages land as DRAFT after propose+approve (#583); the vault
+    must mirror them. ARCHIVED stays out (see removal regression below)."""
     s = KBStore.init(tmp_path / "kb")
     src = s.put_source(b"x", title="x")
     s.put_page(Page(
         id="draft-page", title="Draft",
-        body="not yet approved", type=PageType.CONCEPT,
+        body="gate-approved default status", type=PageType.CONCEPT,
         status=PageStatus.DRAFT, sources=[src.id],
     ))
     result = kb_to_vault(s, vault)
-    assert not (vault / VAULT_DIR / "pages" / "draft-page.md").exists()
-    assert "draft-page" not in result.pages_mirrored
+    assert (vault / VAULT_DIR / "pages" / "draft-page.md").is_file()
+    assert "draft-page" in result.pages_mirrored
+
+
+def test_approve_then_kb_to_vault_mirrors_without_status_handedit(
+    tmp_path: Path, vault: Path,
+) -> None:
+    """Regression for #583: propose+approve defaults (WORKING / DRAFT) must
+    mirror without forcing ACTIONABLE / ACTIVE by hand."""
+    from vouch.proposals import approve, propose_claim, propose_page
+
+    s = KBStore.init(tmp_path / "kb")
+    src = s.put_source(b"seed", title="seed")
+    cpr = propose_claim(
+        s,
+        text="Obsidian mirrors need live post-approve statuses.",
+        evidence=[src.id],
+        proposed_by="alice-example",
+        slug_hint="obsidian-status",
+    )
+    claim = approve(s, cpr.proposal.id, approved_by="blake-example")
+    assert claim.status is ClaimStatus.WORKING
+
+    ppr = propose_page(
+        s,
+        title="Vault status page",
+        body="body cites the claim",
+        proposed_by="alice-example",
+        claim_ids=[claim.id],
+        source_ids=[src.id],
+        slug_hint="vault-status-page",
+    )
+    page = approve(s, ppr.id, approved_by="blake-example")
+    assert page.status is PageStatus.DRAFT
+
+    result = kb_to_vault(s, vault)
+    assert "vault-status-page" in result.pages_mirrored
+    assert "obsidian-status" in result.claims_mirrored
+    assert (vault / VAULT_DIR / "pages" / "vault-status-page.md").is_file()
+    assert (vault / VAULT_DIR / "claims" / "obsidian-status.md").is_file()
+
+
+def test_kb_to_vault_removes_mirrors_after_retraction(
+    store: KBStore, vault: Path,
+) -> None:
+    """Retracting a claim / archiving a page must delete leftover vault
+    markdown so dead knowledge cannot linger."""
+    from vouch import lifecycle
+
+    kb_to_vault(store, vault)
+    claim_path = vault / VAULT_DIR / "claims" / "alpha-claim.md"
+    page_path = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    assert claim_path.is_file()
+    assert page_path.is_file()
+
+    lifecycle.archive(store, claim_id="alpha-claim", actor="reviewer")
+    page = store.get_page("alpha-page")
+    page.status = PageStatus.ARCHIVED
+    store.update_page(page)
+
+    result = kb_to_vault(store, vault)
+    assert "alpha-claim" in result.claims_removed
+    assert "alpha-page" in result.pages_removed
+    assert "alpha-claim" not in result.claims_mirrored
+    assert "alpha-page" not in result.pages_mirrored
+    assert not claim_path.exists()
+    assert not page_path.exists()
+
+
+def test_kb_to_vault_preserves_untracked_user_files(
+    store: KBStore, vault: Path,
+) -> None:
+    """Cleanup must not delete markdown the user dropped into the mirror
+    dirs — those are skipped by vault_to_kb and are not vouch-owned."""
+    kb_to_vault(store, vault)
+    user_page = vault / VAULT_DIR / "pages" / "my-note.md"
+    user_claim = vault / VAULT_DIR / "claims" / "scratch.md"
+    user_page.write_text("# my note\n", encoding="utf-8")
+    user_claim.write_text("# scratch\n", encoding="utf-8")
+
+    result = kb_to_vault(store, vault)
+    assert user_page.is_file()
+    assert user_claim.is_file()
+    assert "my-note" not in result.pages_removed
+    assert "scratch" not in result.claims_removed
 
 
 def test_kb_to_vault_is_idempotent(store: KBStore, vault: Path) -> None:
@@ -248,6 +331,55 @@ def test_sync_vault_rejects_missing_vault(store: KBStore, tmp_path: Path) -> Non
         sync_vault(store, tmp_path / "does-not-exist")
 
 
+def test_sync_vault_surfaces_deleted_citation_as_vault_sync_error(
+    store: KBStore, vault: Path,
+) -> None:
+    """a vault edit to a page whose cited claim was since deleted must
+    surface as a clean VaultSyncError, not the raw ProposalError that
+    propose_page raises for an unknown id — otherwise it escapes the dead
+    `except ArtifactNotFoundError` handler as an uncaught traceback,
+    bypassing the CLI's VaultSyncError renderer. fixture cites `alpha-claim`."""
+    kb_to_vault(store, vault)
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+    # delete the cited claim so propose_page's id validation fails.
+    (store.kb_dir / "claims" / "alpha-claim.yaml").unlink()
+
+    with pytest.raises(VaultSyncError, match="unknown artifact"):
+        sync_vault(store, vault, direction="forward")
+
+
+def test_sync_vault_does_not_mislabel_non_artifact_proposal_errors(
+    store: KBStore, vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """other ProposalErrors from propose_page (e.g. empty title) must not
+    be reported as 'unknown artifact' — that wording is reserved for
+    missing claim/entity/source ids (#547 / CodeRabbit on #548). empty
+    titles are caught earlier by deserialise-and-skip, so drive the
+    non-artifact path by stubbing propose_page."""
+    from vouch.proposals import ProposalError
+
+    kb_to_vault(store, vault)
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+
+    def _reject(*_args: object, **_kwargs: object) -> None:
+        raise ProposalError("page title is empty")
+
+    monkeypatch.setattr("vouch.vault_sync.propose_page", _reject)
+
+    with pytest.raises(VaultSyncError, match="vault edit rejected") as ei:
+        sync_vault(store, vault, direction="forward")
+    assert "unknown artifact" not in str(ei.value)
+    assert "page title is empty" in str(ei.value)
+
+
 # --- CLI surface ----------------------------------------------------------
 
 
@@ -289,6 +421,36 @@ def test_cli_sync_missing_vault_is_clean_error(
     assert result.exit_code != 0
     assert "Traceback" not in result.output
     assert "Error:" in result.output
+
+
+def test_cli_sync_deleted_citation_is_clean_error(
+    store: KBStore, vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """deleted-citation must hit the CLI's VaultSyncError renderer as a
+    one-line Error:, not an uncaught ProposalError traceback (#547)."""
+    monkeypatch.chdir(store.root)
+    runner = CliRunner()
+    runner.invoke(cli, ["sync", "--vault", str(vault)])
+    mirror = vault / VAULT_DIR / "pages" / "alpha-page.md"
+    mirror.write_text(
+        mirror.read_text(encoding="utf-8").replace("Original body.", "Edited."),
+        encoding="utf-8",
+    )
+    (store.kb_dir / "claims" / "alpha-claim.yaml").unlink()
+
+    result = runner.invoke(
+        cli, ["sync", "--vault", str(vault), "--direction", "forward"],
+    )
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    # documented CLI contract (#547): exactly one Error: line, not a
+    # multiline non-traceback rendering that still contains "Error:".
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert lines == [
+        "Error: vault edit references unknown artifact: unknown claim id: alpha-claim"
+    ]
+    assert "unknown artifact" in lines[0]
+    assert "unknown claim id" in lines[0]
 
 
 def test_cli_sync_requires_vault_flag(

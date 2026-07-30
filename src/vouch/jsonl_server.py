@@ -46,6 +46,7 @@ from .models import ProposalStatus
 from .page_filters import filter_pages
 from .proposals import (
     EXPIRE_ACTOR,
+    DeadClaimRefsError,
     ProposalError,
     approve,
     expire_pending,
@@ -81,6 +82,19 @@ def _store() -> KBStore:
         return KBStore(discover_root())
     except KBNotFoundError as e:
         raise RuntimeError(str(e)) from e
+
+
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
 
 
 def _agent() -> str:
@@ -266,6 +280,24 @@ def _h_read_relation(p: dict) -> dict:
     result = relation.model_dump(mode="json")
     return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
         result, store, query=None,
+    )
+
+
+def _h_read_evidence(p: dict) -> dict:
+    store = _store()
+    ev = store.get_evidence(p["evidence_id"])
+    result = ev.model_dump(mode="json")
+    return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
+        result, store, query=ev.quote,
+    )
+
+
+def _h_read_source(p: dict) -> dict:
+    store = _store()
+    src = store.get_source(p["source_id"])
+    result = src.model_dump(mode="json")
+    return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
+        result, store, query=src.title,
     )
 
 
@@ -458,7 +490,7 @@ def _h_session_transcript(p: dict) -> dict:
     agent = p.get("agent")
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 def _h_propose_entity(p: dict) -> dict:
@@ -508,7 +540,8 @@ def _h_propose_delete(p: dict) -> dict:
 
 def _h_approve(p: dict) -> dict:
     a = approve(_store(), p["proposal_id"], approved_by=_agent(),
-                reason=p.get("reason"))
+                reason=p.get("reason"),
+                drop_missing_claims=bool(p.get("drop_missing_claims", False)))
     return {"kind": type(a).__name__.lower(), "id": a.id}
 
 
@@ -558,6 +591,18 @@ def _h_contradict(p: dict) -> dict:
 def _h_archive(p: dict) -> dict:
     c = life.archive(_store(), claim_id=p["claim_id"], actor=_agent())
     return {"id": c.id, "status": c.status.value}
+
+
+def _h_wipe_dead_refs(p: dict) -> dict:
+    r = life.wipe_dead_claim_refs(
+        _store(), actor=_agent(), dry_run=bool(p.get("dry_run", False)),
+    )
+    return {
+        "pages": r.pages,
+        "proposals": r.proposals,
+        "dropped": r.dropped,
+        "dry_run": r.dry_run,
+    }
 
 
 def _h_confirm(p: dict) -> dict:
@@ -661,17 +706,20 @@ def _h_doctor(_: dict) -> dict:
 
 def _h_export(p: dict) -> dict:
     s = _store()
+    exclude = tuple(p.get("exclude") or ())
     dest = bundle.fenced_bundle_path(s, p["out_path"])
-    manifest = bundle.export(s.kb_dir, dest=dest, actor=_agent())
+    manifest = bundle.export(s.kb_dir, dest=dest, actor=_agent(), exclude=exclude)
     return {"bundle_id": manifest["bundle_id"],
-            "files": len(manifest["files"]), "out": p["out_path"]}
+            "files": len(manifest["files"]), "out": p["out_path"],
+            "excluded": manifest["excluded"]}
 
 
 def _h_export_check(p: dict) -> dict:
     s = _store()
     r = bundle.export_check(bundle.fenced_bundle_path(s, p["bundle_path"]))
     return {"ok": r.ok, "bundle_id": r.bundle_id,
-            "files_checked": r.files_checked, "issues": r.issues}
+            "files_checked": r.files_checked, "issues": r.issues,
+            "counts": r.counts, "excluded": r.excluded}
 
 
 def _h_import_check(p: dict) -> dict:
@@ -854,6 +902,8 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.read_claim": _h_read_claim,
     "kb.read_entity": _h_read_entity,
     "kb.read_relation": _h_read_relation,
+    "kb.read_evidence": _h_read_evidence,
+    "kb.read_source": _h_read_source,
     "kb.diff": _h_diff,
     "kb.list_pages": _h_list_pages,
     "kb.list_claims": _h_list_claims,
@@ -882,6 +932,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.archive": _h_archive,
     "kb.confirm": _h_confirm,
     "kb.clear_claims": _h_clear_claims,
+    "kb.wipe_dead_refs": _h_wipe_dead_refs,
     "kb.cite": _h_cite,
     "kb.source_verify": _h_source_verify,
     "kb.session_start": _h_session_start,
@@ -937,6 +988,14 @@ def handle_request(envelope: dict) -> dict:
         return {
             "id": req_id, "ok": False,
             "error": {"code": "missing_param", "message": str(e)},
+        }
+    except DeadClaimRefsError as e:
+        # Distinct code so interactive clients can offer "strip dead refs
+        # and approve" and retry with drop_missing_claims — a message-match
+        # on invalid_request would be a brittle contract.
+        return {
+            "id": req_id, "ok": False,
+            "error": {"code": "dead_claim_refs", "message": str(e)},
         }
     except (ValueError, ProposalError, ArtifactNotFoundError) as e:
         return {

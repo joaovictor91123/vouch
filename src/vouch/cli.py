@@ -7,6 +7,7 @@ same storage + audit + index layer.
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import io
 import json
@@ -24,11 +25,14 @@ from typing import Any, Literal
 import click
 import yaml
 
-from . import __version__, bundle, health, volunteer_context
+from . import __version__, bundle, health, hub_client, volunteer_context
+from . import adopt as adopt_mod
 from . import audit as audit_mod
 from . import capture as capture_mod
+from . import chatgpt_import as chatgpt_import_mod
 from . import codex_rollout as codex_rollout_mod
 from . import compile as compile_mod
+from . import contradictions as contradictions_mod
 from . import digest as digest_mod
 from . import fetch as fetch_mod
 from . import hub as hub_mod
@@ -49,6 +53,7 @@ from . import synthesize as synth
 from . import trust as trust_mod
 from . import vault_sync as vault_sync_mod
 from . import verify as verify_mod
+from . import wiki_render as wiki_render_mod
 from .capabilities import capabilities as build_caps
 from .context import build_context_pack
 from .lifecycle import LifecycleError
@@ -65,10 +70,12 @@ from .onboarding import (
 from .page_filters import filter_pages, parse_kv
 from .page_kinds import PageKindError, load_page_kind_registry
 from .proposals import (
+    ADMISSION_ACTOR,
     EXPIRE_ACTOR,
     ProposalError,
     check_approvable,
     expire_pending,
+    missing_claim_refs,
     propose_claim,
     propose_delete,
     propose_entity,
@@ -106,6 +113,7 @@ def _cli_errors() -> Iterator[None]:
         ProposalError,
         LifecycleError,
         migrations_mod.MigrationError,
+        chatgpt_import_mod.ChatGPTImportError,
         codex_rollout_mod.CodexRolloutError,
     ) as e:
         raise click.ClickException(str(e)) from e
@@ -116,6 +124,19 @@ def _load_store(start: Path | None = None) -> KBStore:
         root = discover_root(start)
     except KBNotFoundError as e:
         click.echo(f"error: {e}", err=True)
+        # A KB-less folder under an opted-in personal fallback is NOT inert —
+        # its sessions capture into the personal KB. Saying only "run vouch
+        # init" here would hide where this folder's knowledge is going.
+        fallback = None
+        with contextlib.suppress(Exception):
+            fallback = hub_mod.personal_fallback_store()
+        if fallback is not None:
+            click.echo(
+                f"note: sessions in this folder capture into your personal KB "
+                f"({fallback.root}). `vouch init` here, then `vouch adopt`, "
+                "moves that knowledge into this project.",
+                err=True,
+            )
         click.echo("hint: run `vouch init` in your project root.", err=True)
         sys.exit(2)
     # Reads proceed under the personal-role registry guard, but say so:
@@ -295,11 +316,12 @@ def discover(path: str | None) -> None:
 
 @cli.group()
 def hub() -> None:
-    """Machine-level registry of KBs (the substrate for global vouch).
+    """Machine registry of KBs and sync with a VouchHub.
 
     The registry at ~/.config/vouch/registry.yaml is advisory routing
     state — authority stays in each KB's own .vouch/. It is machine-local
-    and never committed.
+    and never committed. The link/push/pull/status subcommands sync this
+    KB's approved knowledge with a remote VouchHub, gated by review on pull.
     """
 
 
@@ -362,6 +384,233 @@ def hub_unregister(token: str) -> None:
     if removed is None:
         raise click.ClickException(f"no registered KB matches {token!r}")
     click.echo(f"unregistered {removed.name} ({removed.kb_id})")
+
+
+def _init_personal_kb(fallback: bool | None) -> Path:
+    """Create + register the personal catch-all KB; shared by the two entry
+    points (`vouch hub init-personal` and `install-mcp --global`'s opt-in)
+    so they cannot drift.
+
+    ``fallback`` None means "don't touch the flag": a fresh KB starts off
+    (capture into it stays opt-in), an existing KB keeps whatever it says.
+    """
+    root = hub_mod.personal_kb_root()
+    if root is None:
+        raise click.ClickException(
+            "cannot determine a home directory for the personal KB — "
+            "set VOUCH_PERSONAL_KB to a writable folder"
+        )
+    created = not (root / ".vouch").is_dir()
+    if created:
+        try:
+            _bootstrap_kb(root)
+        except Exception as e:
+            # cli boundary: an unwritable XDG path (or any other OSError) must
+            # read as an error with a remedy, not a traceback — and must not
+            # leave half a KB that a rerun would mistake for a finished one.
+            shutil.rmtree(root / ".vouch", ignore_errors=True)
+            raise click.ClickException(
+                f"could not initialise the personal KB at {root}: {e} — fix "
+                "the cause and rerun, or set VOUCH_PERSONAL_KB to a writable "
+                "folder"
+            ) from e
+        click.echo(f"Initialised personal KB at {root / '.vouch'}")
+    else:
+        click.echo(f"Personal KB already present at {root / '.vouch'}")
+    # A personal row pointing somewhere else is a routing hazard: capture
+    # would follow one KB while `hub fallback` flips another. Retire the
+    # stale rows instead of leaving the choice to ordering.
+    for stale in hub_mod.personal_entries():
+        if Path(stale.path).expanduser().resolve() != root.resolve():
+            hub_mod.unregister_kb(stale.kb_id)
+            click.echo(
+                f"note: unregistered a previous personal KB row ({stale.path})",
+                err=True,
+            )
+    try:
+        entry = hub_mod.register_kb(
+            root, role="personal", name="personal", actor=_whoami()
+        )
+    except Exception as e:
+        raise click.ClickException(
+            f"could not register the personal KB at {root}: {e}"
+        ) from e
+    click.echo(f"Registered in the machine registry: {entry.name} ({entry.kb_id})")
+    if fallback is not None:
+        try:
+            hub_mod.set_personal_fallback(root, fallback)
+        except (OSError, ValueError) as e:
+            raise click.ClickException(str(e)) from e
+    enabled = hub_mod.personal_fallback_enabled(root)
+    if enabled:
+        click.echo(
+            "Fallback capture: on — sessions in folders WITHOUT a project KB "
+            "capture here, and recall in those folders reads this whole KB "
+            "(one store shared by all of them). `vouch init` + `vouch adopt` "
+            "moves a folder's share into its own project KB."
+        )
+    else:
+        click.echo(
+            "Fallback capture: off — folders without a project KB capture "
+            "nowhere (enable with `vouch hub fallback on`)."
+        )
+    return root
+
+
+@hub.command("init-personal")
+@click.option(
+    "--fallback/--no-fallback",
+    "fallback",
+    default=None,
+    help="Also opt in (or out of) capturing KB-less folders' sessions into "
+    "this KB. Without the flag: a prompt on a terminal, otherwise off.",
+)
+def hub_init_personal(fallback: bool | None) -> None:
+    """Create + register this machine's personal catch-all KB.
+
+    Lives at ~/.local/share/vouch/personal (XDG_DATA_HOME honoured;
+    override with VOUCH_PERSONAL_KB). Idempotent: re-running refreshes the
+    registry row and leaves the fallback flag alone unless you pass one.
+    """
+    created = True
+    root = hub_mod.personal_kb_root()
+    if root is not None and (root / ".vouch").is_dir():
+        created = False
+    if fallback is None and created and sys.stdin.isatty():
+        fallback = click.confirm(
+            "Capture sessions in folders WITHOUT a project KB into this "
+            "personal KB? It is one shared store: what you capture in any "
+            "KB-less folder is recalled in all of them (adopt a folder's "
+            "share into a project KB later)",
+            default=False,
+        )
+    _init_personal_kb(fallback)
+
+
+@hub.command("fallback")
+@click.argument(
+    "state", required=False, type=click.Choice(["on", "off", "status"])
+)
+def hub_fallback(state: str | None) -> None:
+    """Show or flip fallback capture on the registered personal KB."""
+    entry = hub_mod.personal_entry()
+    if entry is None:
+        raise click.ClickException(
+            "no personal KB registered — create one with `vouch hub init-personal`"
+        )
+    root = Path(entry.path)
+    if not (root / ".vouch").is_dir():
+        raise click.ClickException(
+            f"registered personal KB at {root} has no .vouch/ — re-run "
+            "`vouch hub init-personal` (or `vouch hub unregister` the stale row)"
+        )
+    if state in (None, "status"):
+        enabled = hub_mod.personal_fallback_enabled(root)
+        click.echo(f"fallback capture: {'on' if enabled else 'off'}  ({root})")
+        return
+    try:
+        hub_mod.set_personal_fallback(root, state == "on")
+    except (OSError, ValueError) as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"fallback capture: {state}  ({root})")
+
+
+@cli.command()
+@click.option(
+    "--from-path",
+    "from_path",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Adopt captures whose origin is this folder instead of the project "
+    "root (for a project that moved since its sessions were captured).",
+)
+@click.option(
+    "--retire",
+    is_flag=True,
+    help="Archive the adopted claims in the personal KB so they stop "
+    "surfacing in personal recall (sources and audit history stay).",
+)
+@click.option("--dry-run", is_flag=True, help="Report what would move; write nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the report as JSON.")
+def adopt(
+    from_path: str | None, retire: bool, dry_run: bool, as_json: bool
+) -> None:
+    """Bring this folder's personal-KB captures into the project KB.
+
+    Sessions that ran here before `vouch init` (under a --global install
+    with the personal fallback on) captured into the machine's personal
+    KB, stamped with this folder as their origin. Adopt copies those
+    sources in and re-proposes their claims through THIS KB's own review
+    gate — receipts re-verify mechanically, so under the starter config
+    they land durable; under a human-only gate they land pending.
+    """
+    store = _load_store()
+    entry = hub_mod.personal_entry()
+    if entry is None:
+        raise click.ClickException(
+            "no personal KB registered on this machine — nothing to adopt "
+            "(see `vouch hub init-personal`)"
+        )
+    personal_root = Path(entry.path)
+    if not (personal_root / ".vouch").is_dir():
+        raise click.ClickException(
+            f"registered personal KB at {personal_root} has no .vouch/ — "
+            "re-run `vouch hub init-personal`"
+        )
+    personal = KBStore(personal_root)
+    if personal.kb_dir.resolve() == store.kb_dir.resolve():
+        raise click.ClickException(
+            "this folder IS the personal KB — adopt runs inside a project "
+            "with its own `.vouch/`"
+        )
+    match_root = Path(from_path).resolve() if from_path else store.root.resolve()
+    with _cli_errors():
+        report = adopt_mod.adopt(
+            store,
+            personal,
+            match_root=match_root,
+            actor=_whoami(),
+            retire=retire,
+            dry_run=dry_run,
+        )
+    if as_json:
+        _emit_json(report.as_dict())
+        return
+    verb = "would adopt" if dry_run else "adopted"
+    if not (
+        report.sources
+        or report.claims_durable
+        or report.claims_pending
+        or report.claims_skipped
+        or report.pages_pending_in_personal
+    ):
+        click.echo(
+            f"nothing to adopt: no personal-KB captures originate under "
+            f"{match_root} (personal KB: {personal_root})"
+        )
+        return
+    click.echo(
+        f"{verb} from personal KB {entry.name} ({entry.kb_id[:8]}…), "
+        f"origin {match_root}:"
+    )
+    click.echo(f"  sources copied:   {len(report.sources)}")
+    click.echo(f"  claims durable:   {len(report.claims_durable)}")
+    click.echo(f"  claims pending:   {len(report.claims_pending)}")
+    click.echo(f"  claims skipped:   {len(report.claims_skipped)}  (already here)")
+    if retire:
+        click.echo(
+            f"  retired (personal): {len(report.retired)}  "
+            "(only claims that landed durable here)"
+        )
+    if report.pages_pending_in_personal:
+        click.echo(
+            f"  session summaries captured here that are still pending in the "
+            f"personal KB: {len(report.pages_pending_in_personal)} — review "
+            f"them there (`cd {personal_root} && vouch review`); adopt moves "
+            "sources and claims, not unreviewed pages."
+        )
+    if report.claims_pending and not dry_run:
+        click.echo("review the pending ones with `vouch review`.")
 
 
 @cli.command()
@@ -1064,6 +1313,43 @@ def pending(as_json: bool) -> None:
         click.echo(f"    {str(preview).strip()[:120]}")
 
 
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of text.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Show at most N.")
+@click.option(
+    "--admission",
+    "admission_only",
+    is_flag=True,
+    help="Only auto-rejections by the admission gate.",
+)
+def rejected(as_json: bool, limit: int | None, admission_only: bool) -> None:
+    """List rejected proposals — including admission-gate auto-rejections.
+
+    A rejected proposal is never deleted; it lives in ``decided/`` with the
+    reason it was refused. Use this to audit what the admission gate dropped and
+    to catch a false positive (re-propose it deliberately if it was good).
+    """
+    store = _load_store()
+    items = store.list_proposals(ProposalStatus.REJECTED)
+    if admission_only:
+        items = [pr for pr in items if pr.decided_by == ADMISSION_ACTOR]
+    items.sort(key=lambda pr: pr.decided_at or pr.proposed_at, reverse=True)
+    if limit is not None:
+        items = items[:limit]
+    if as_json:
+        _emit_json([pr.model_dump(mode="json") for pr in items])
+        return
+    if not items:
+        click.echo("no rejected proposals")
+        return
+    for pr in items:
+        preview = pr.payload.get("text") or pr.payload.get("title") or pr.payload.get("name") or "—"
+        click.echo(f"• {pr.id}  [{pr.kind.value}]  by {pr.proposed_by} → {pr.decided_by}")
+        click.echo(f"    {str(preview).strip()[:100]}")
+        if pr.decision_reason:
+            click.echo(f"    reason: {pr.decision_reason}")
+
+
 def _proposal_preview(pr: Proposal) -> str:
     preview = (
         pr.payload.get("text")
@@ -1209,6 +1495,26 @@ def read_relation(relation_id: str) -> None:
     click.echo(yaml.safe_dump(relation.model_dump(mode="json"), sort_keys=False))
 
 
+@cli.command(name="read-evidence")
+@click.argument("evidence_id")
+def read_evidence(evidence_id: str) -> None:
+    """Read an evidence record by id."""
+    store = _load_store()
+    with _cli_errors():
+        ev = store.get_evidence(evidence_id)
+    click.echo(yaml.safe_dump(ev.model_dump(mode="json"), sort_keys=False))
+
+
+@cli.command(name="read-source")
+@click.argument("source_id")
+def read_source(source_id: str) -> None:
+    """Read a registered source's metadata by id."""
+    store = _load_store()
+    with _cli_errors():
+        src = store.get_source(source_id)
+    click.echo(yaml.safe_dump(src.model_dump(mode="json"), sort_keys=False))
+
+
 @cli.command(name="list-claims")
 def list_claims() -> None:
     """List all approved claims."""
@@ -1314,7 +1620,19 @@ def triage(proposal_ids: tuple[str, ...], as_json: bool, reverse: bool) -> None:
     help="Best-effort: approve every id that can be approved and report the "
     "rest, instead of the default all-or-nothing precheck.",
 )
-def approve(proposal_ids: tuple[str, ...], reason: str | None, keep_going: bool) -> None:
+@click.option(
+    "--drop-missing-claims",
+    is_flag=True,
+    help="Strip references to claims that no longer exist from page "
+    "proposals instead of refusing to approve them (dropped ids are "
+    "recorded in the audit event).",
+)
+def approve(
+    proposal_ids: tuple[str, ...],
+    reason: str | None,
+    keep_going: bool,
+    drop_missing_claims: bool,
+) -> None:
     """Approve one or more proposals — converts each into a durable artifact.
 
     Pass several ids to approve a batch in one call (useful for CI and
@@ -1329,16 +1647,46 @@ def approve(proposal_ids: tuple[str, ...], reason: str | None, keep_going: bool)
       aborts the whole batch and nothing is approved.
     - --keep-going (best-effort): approve each id independently, report the
       failures, and exit non-zero if any failed.
+
+    A page proposal citing claims that no longer exist blocks the batch;
+    interactively you are offered to strip the dead references, and
+    --drop-missing-claims does the same without the prompt.
     """
     store = _load_store()
     approver = _whoami()
 
     if not keep_going:
-        blocked = [
-            (pid, reason_blocked)
-            for pid in proposal_ids
-            if (reason_blocked := check_approvable(store, pid, approved_by=approver))
-        ]
+        blocked: list[tuple[str, str]] = []
+        dead_blocked: list[tuple[str, list[str]]] = []
+        for pid in proposal_ids:
+            why = check_approvable(store, pid, approved_by=approver)
+            if not why:
+                continue
+            # A dead claim reference is a decision, not a defect: offer the
+            # strip-and-approve path instead of a hard abort. Any other block
+            # (typo, already decided, self-approval) still aborts the batch.
+            if "references unknown claim" in why:
+                dead = missing_claim_refs(store, store.get_proposal(pid))
+                if dead:
+                    dead_blocked.append((pid, dead))
+                    continue
+            blocked.append((pid, why))
+        if dead_blocked and not drop_missing_claims:
+            for pid, dead in dead_blocked:
+                click.echo(
+                    f"! {pid}: cites missing claim(s): {', '.join(dead)}", err=True
+                )
+            if sys.stdin.isatty() and click.confirm(
+                f"strip the dead claim reference(s) from {len(dead_blocked)} "
+                "proposal(s) and approve?"
+            ):
+                drop_missing_claims = True
+            else:
+                blocked.extend(
+                    (pid, f"cites missing claim(s): {', '.join(dead)} "
+                     "(use --drop-missing-claims to strip them)")
+                    for pid, dead in dead_blocked
+                )
         if blocked:
             for pid, why in blocked:
                 click.echo(f"✗ {pid}: {why}", err=True)
@@ -1350,7 +1698,10 @@ def approve(proposal_ids: tuple[str, ...], reason: str | None, keep_going: bool)
     failures = 0
     for pid in proposal_ids:
         try:
-            artifact = do_approve(store, pid, approved_by=approver, reason=reason)
+            artifact = do_approve(
+                store, pid, approved_by=approver, reason=reason,
+                drop_missing_claims=drop_missing_claims,
+            )
         except (ArtifactNotFoundError, ValueError, ProposalError, LifecycleError) as e:
             failures += 1
             click.echo(f"✗ {pid}: {e}", err=True)
@@ -1511,9 +1862,19 @@ def propose_claim_cmd(
     "--no-approve", is_flag=True,
     help="File the claims but never auto-approve, even if the receipt gate is on.",
 )
+@click.option(
+    "--max-claims", type=int, default=None,
+    help="Keep only the N most information-dense spans (density selection). "
+         "Unset captures every quotable span.",
+)
+@click.option(
+    "--budget-chars", type=int, default=None,
+    help="Keep the densest spans that fit within this many characters.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit source id + counts as json.")
 def ingest_cmd(
-    path: Path, title: str | None, no_approve: bool, as_json: bool
+    path: Path, title: str | None, no_approve: bool,
+    max_claims: int | None, budget_chars: int | None, as_json: bool,
 ) -> None:
     """Ingest a file as a source and extract receipt-backed claims from it.
 
@@ -1521,6 +1882,10 @@ def ingest_cmd(
     against the source is approved with no human -- "run vouch on a doc and it
     just captures the knowledge." Without the gate the claims are filed pending
     for review; a claim that cannot quote its source is never rubber-stamped.
+
+    --max-claims / --budget-chars bound the capture to the most informative
+    spans instead of restating the whole document -- the selection knob that
+    keeps the facts worth a claim and drops filler.
     """
     from . import extract as extract_mod
 
@@ -1531,6 +1896,8 @@ def ingest_cmd(
             proposed_by=_whoami(),
             title=title or path.name,
             auto_approve=not no_approve,
+            max_claims=max_claims,
+            budget_chars=budget_chars,
         )
     pending = sum(
         1 for p in store.list_proposals(ProposalStatus.PENDING)
@@ -2312,6 +2679,53 @@ def claims_clear(auto_only: bool, before: str | None, confirm: bool, dry_run: bo
     click.echo(f"cleared {len(to_clear)} claims")
 
 
+@cli.command(name="wipe-dead-refs")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Preview what would be stripped without making changes")
+@click.option("--confirm", "skip_confirm", is_flag=True, default=False,
+              help="Skip confirmation prompt")
+def wipe_dead_refs(dry_run: bool, skip_confirm: bool) -> None:
+    """Strip references to claims that no longer exist, KB-wide.
+
+    Scans durable pages and pending page proposals for claim ids that
+    resolve to no claim file (archived claims still resolve) and removes
+    them — frontmatter list and inline [claim: …] markers both. One
+    audited bulk event records what was removed. Run after claims were
+    redacted or bulk-cleared and lint reports orphan_page_ref.
+    """
+    store = _load_store()
+    with _cli_errors():
+        preview = life.wipe_dead_claim_refs(store, actor=_whoami(), dry_run=True)
+
+    if not preview.pages and not preview.proposals:
+        click.echo("no dead claim references found")
+        return
+
+    click.echo(f"found {preview.dropped} dead claim reference(s):")
+    for page_id, dead in preview.pages.items():
+        click.echo(f"  page {page_id}: {', '.join(dead)}")
+    for pid, dead in preview.proposals.items():
+        click.echo(f"  proposal {pid}: {', '.join(dead)}")
+
+    if dry_run:
+        click.echo("(dry-run mode: no changes made)")
+        return
+
+    if not skip_confirm and not click.confirm(
+        f"\nStrip {preview.dropped} dead reference(s)?"
+    ):
+        click.echo("cancelled")
+        return
+
+    with _cli_errors():
+        result = life.wipe_dead_claim_refs(store, actor=_whoami(), dry_run=False)
+    click.echo(
+        f"stripped {result.dropped} dead reference(s) from "
+        f"{len(result.pages)} page(s) and {len(result.proposals)} "
+        "pending proposal(s)"
+    )
+
+
 @cli.command()
 @click.argument("claim_id")
 def confirm(claim_id: str) -> None:
@@ -2452,14 +2866,15 @@ def capture() -> None:
     """Automatic session capture (driven by claude code hooks)."""
 
 
-def _capture_store(start: Path | None = None) -> KBStore | None:
-    """Locate the KB without the sys.exit(2) that _load_store does — hooks
-    must never abort the host.
+def _capture_target(start: Path | None = None) -> hub_mod.CaptureTarget:
+    """Locate the capture target without the sys.exit(2) that _load_store
+    does — hooks must never abort the host.
 
-    Uses the hub resolver so ambient capture also respects the registry
-    guard: a KB registered as personal-role never absorbs another
-    directory's session (the write-plane half of the ~/.vouch hijack fix;
-    the $HOME walk-stop in discover_root is the structural half).
+    Uses the hub resolver so ambient capture respects the registry guard
+    (a personal-role KB never absorbs another directory's session via
+    discovery) AND the personal fallback: a folder with no project KB
+    captures into the opted-in personal catch-all, origin recorded, or
+    nowhere at all.
 
     ``start`` pins the resolution to the host-reported project directory
     (the hook payload's ``cwd``) — under a machine-wide install the hook
@@ -2467,15 +2882,21 @@ def _capture_store(start: Path | None = None) -> KBStore | None:
     cwd, is what names the session's project.
     """
     try:
-        res = hub_mod.resolve(start)
+        target = hub_mod.capture_target(start)
     except Exception:
-        return None
-    if res.root is None:
-        return None
-    if res.guard is not None:
-        click.echo(f"vouch: {res.guard}", err=True)
-        return None
-    return KBStore(res.root)
+        return hub_mod.CaptureTarget(store=None)
+    if target.store is None and target.note:
+        # A guard refusal must be loud; quiet fallback routing is announced
+        # once per session by `capture banner`, not per hook invocation.
+        click.echo(f"vouch: {target.note}", err=True)
+    return target
+
+
+def _capture_store(start: Path | None = None) -> KBStore | None:
+    """The store half of :func:`_capture_target` for callers that don't
+    need the fallback origin (buffers, summaries — origin rides on the
+    captured *sources*, stamped in `capture answer`)."""
+    return _capture_target(start).store
 
 
 def _read_hook_payload() -> dict[str, Any]:
@@ -2555,7 +2976,12 @@ def capture_observe_cmd() -> None:
 @capture.command("finalize")
 @click.option("--session-id", default=None, help="Session id (else read from stdin payload).")
 def capture_finalize_cmd(session_id: str | None) -> None:
-    """Roll a session buffer into a PENDING summary (SessionEnd hook payload on stdin)."""
+    """Roll a session buffer into a PENDING summary (SessionEnd hook payload on stdin).
+
+    Under capture.answer_mode: session (the default) this also extracts
+    receipt-backed claims once from the full transcript history, replacing
+    the per-turn Stop-hook extraction.
+    """
     payload: dict[str, Any] = {}
     if not sys.stdin.isatty():
         raw = sys.stdin.read()
@@ -2572,16 +2998,17 @@ def capture_finalize_cmd(session_id: str | None) -> None:
     start, ok = _hook_start(payload)
     if not ok:
         return
-    store = _capture_store(start)
-    if store is None:
+    target = _capture_target(start)
+    if target.store is None:
         return
     cwd = Path(str(payload.get("cwd") or ".")).resolve()
     transcript_raw = payload.get("transcript_path")
     transcript = Path(str(transcript_raw)) if transcript_raw else None
     result = capture_mod.finalize(
-        store, sid, cwd=cwd, project=cwd.name,
+        target.store, sid, cwd=cwd, project=cwd.name,
         generated_at=datetime.now(UTC).isoformat(),
         transcript_path=transcript,
+        origin=target.origin if target.fallback else None,
     )
     _emit_json(result)
 
@@ -2595,6 +3022,9 @@ def capture_answer_cmd(session_id: str | None) -> None:
     answer is ingested as a source and its receipt-backed claims are
     auto-approved when review.auto_approve_on_receipt is on (the
     starter-config default) or under trusted-agent, else left pending.
+    Under capture.answer_mode: session (the default) this defers — claims are
+    extracted once at SessionEnd from the full transcript by `capture
+    finalize` — and only capture.answer_mode: turn files claims per turn.
     Always exits 0 so a capture failure can never break the turn.
     """
     if sys.stdin.isatty():
@@ -2611,10 +3041,13 @@ def capture_answer_cmd(session_id: str | None) -> None:
         start, ok = _hook_start(payload)
         if not ok:
             return
-        store = _capture_store(start)
-        if store is None:
+        target = _capture_target(start)
+        if target.store is None:
             return
-        result = capture_mod.capture_answer(store, sid, Path(str(transcript_raw)))
+        result = capture_mod.capture_answer(
+            target.store, sid, Path(str(transcript_raw)),
+            origin=target.origin if target.fallback else None,
+        )
         _emit_json(result)
     except Exception:
         # a capture failure must never break the user's turn.
@@ -2625,7 +3058,14 @@ def capture_answer_cmd(session_id: str | None) -> None:
 @click.option("--session-id", default=None, help="Current session id (else env VOUCH_SESSION_ID).")
 @click.option("--max-age-seconds", type=float, default=3600.0, help="Max age in seconds.")
 def capture_finalize_all_cmd(session_id: str | None, max_age_seconds: float) -> None:
-    """Finalize all capture buffers except current session (SessionStart cleanup)."""
+    """Finalize all capture buffers except current session (SessionStart cleanup).
+
+    The shipped SessionStart hook passes no --session-id and sets no
+    VOUCH_SESSION_ID, so the current session id has to come from the stdin
+    hook payload, the same way capture_finalize_cmd reads it at SessionEnd.
+    --session-id and VOUCH_SESSION_ID remain as fallbacks for direct/manual
+    invocation.
+    """
     payload = _read_hook_payload()
     sid = (
         session_id
@@ -2732,7 +3172,8 @@ def capture_banner_cmd() -> None:
     """Emit a SessionStart nudge if captured summaries await review."""
     payload = _read_hook_payload()
     start, _ok = _hook_start(payload)
-    store = _capture_store(start)
+    target = _capture_target(start)
+    store = target.store
     if store is None:
         # SessionStart stdout becomes session context — this is the one
         # channel where the promised "run `vouch init`" hint is actually
@@ -2742,6 +3183,17 @@ def capture_banner_cmd() -> None:
             "`vouch init` here to enable durable memory."
         )
         return
+    if target.fallback:
+        # Sessions must never capture somewhere the user can't see: this
+        # line is the per-session announcement of the personal fallback,
+        # including that the store is shared with every other KB-less folder.
+        click.echo(
+            "vouch: no project KB in this folder — this session captures to "
+            f"your personal KB ({store.root}), one store shared by every "
+            "KB-less folder, so recall here can surface knowledge captured "
+            "elsewhere. Run `vouch init` here, then `vouch adopt`, to give "
+            "this folder its own KB."
+        )
     n = capture_mod.pending_count(store)
     if n:
         click.echo(
@@ -2754,12 +3206,15 @@ def capture_banner_cmd() -> None:
 def recall_cmd() -> None:
     """Emit a digest of all approved knowledge for session-start injection."""
     # Read plane: like context-hook, the digest warns under the personal-role
-    # guard instead of going dark. Resolution starts at the hook payload's
-    # cwd when given (machine-wide installs run this from anywhere).
+    # guard instead of going dark, and follows capture into the personal
+    # fallback (a KB-less folder that captures personally recalls personally).
+    # Resolution starts at the hook payload's cwd when given (machine-wide
+    # installs run this from anywhere).
     payload = _read_hook_payload()
     start, _ok = _hook_start(payload)
+    fallback = False
     try:
-        store, warning = hub_mod.resolve_for_read(start)
+        store, warning, fallback = hub_mod.read_target(start)
     except Exception:
         store, warning = None, None
     if warning:
@@ -2770,7 +3225,9 @@ def recall_cmd() -> None:
     if not cfg.enabled:
         return
     stats: dict[str, int] = {}
-    digest = recall_mod.build_digest(store, max_chars=cfg.max_chars, stats=stats)
+    digest = recall_mod.build_digest(
+        store, max_chars=cfg.max_chars, stats=stats, personal=fallback
+    )
     if stats.get("hidden"):
         # stderr only — stdout is injected into the host turn and must stay
         # clean. Scope filtering must never be silent.
@@ -2821,6 +3278,30 @@ def compile_cmd(dry_run: bool, max_pages: int | None,
             _echo(f"  • {row['title']} — {row['reason']}")
     if report.proposed and not dry_run:
         _echo("run `vouch review` to decide.")
+
+
+@cli.command(name="render-wiki")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False), default=None,
+              help="Write index.md + MOC.md here (default: print the index).")
+def render_wiki_cmd(out_dir: str | None) -> None:
+    """Render a derived index + map-of-content over approved pages.
+
+    A regenerable view of the wiki front door — never a proposal, never gated.
+    With --out, writes index.md and MOC.md there; otherwise prints the index.
+    """
+    store = _load_store()
+    pages = store.list_pages()
+    index = wiki_render_mod.render_index(pages)
+    if out_dir is None:
+        _echo(index)
+        return
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "index.md").write_text(index, encoding="utf-8")
+    (target / "MOC.md").write_text(
+        wiki_render_mod.render_moc(pages), encoding="utf-8",
+    )
+    _echo(f"rendered {len(pages)} page(s) → {target}/index.md + MOC.md")
 
 
 @cli.command()
@@ -3054,9 +3535,11 @@ def context_hook() -> None:
     stdin_text = sys.stdin.read()
     # Read plane: recall must survive the personal-role guard (warn, don't
     # go dark) — a silent context-hook is indistinguishable from vouch
-    # being broken. Capture commands stay on the refusing _capture_store.
-    # Resolution starts at the payload's cwd when given: under a global
-    # install the hook process cwd is not guaranteed to be the project.
+    # being broken — and follows capture into the personal fallback so a
+    # KB-less folder recalls the knowledge it captures. Capture commands
+    # stay on the refusing _capture_target. Resolution starts at the
+    # payload's cwd when given: under a global install the hook process
+    # cwd is not guaranteed to be the project.
     start: Path | None = None
     try:
         loaded = json.loads(stdin_text) if stdin_text.strip() else {}
@@ -3064,8 +3547,9 @@ def context_hook() -> None:
             start, _ok = _hook_start(loaded)
     except json.JSONDecodeError:
         start = None
+    fallback = False
     try:
-        store, warning = hub_mod.resolve_for_read(start)
+        store, warning, fallback = hub_mod.read_target(start)
     except Exception:
         store, warning = None, None
     if warning:
@@ -3073,7 +3557,9 @@ def context_hook() -> None:
     out = ""
     if store is not None:
         try:
-            out = hooks.build_claude_prompt_hook(store, stdin_text)
+            out = hooks.build_claude_prompt_hook(
+                store, stdin_text, personal=fallback
+            )
         except Exception:
             out = ""
     if out:
@@ -3235,6 +3721,43 @@ def dedup(threshold: float, dry_run: bool) -> None:
         return
     for r in rows:
         click.echo(f"{r['kind']}/{r['id']} ~ {r['kind']}/{r['near_id']}  cos={r['cosine']:.4f}")
+
+
+@cli.command(name="contradict-scan")
+@click.option("--threshold", default=contradictions_mod.DEFAULT_THRESHOLD,
+              show_default=True, type=float)
+@click.option("--entity", default=None, help="Restrict the scan to one entity id.")
+@click.option("--dry-run/--no-dry-run", default=True, show_default=True)
+@click.option("--limit", default=None, type=int,
+              help="Cap the number of pairs proposed in one run.")
+def contradict_scan(
+    threshold: float, entity: str | None, dry_run: bool, limit: int | None,
+) -> None:
+    """Scan approved claims for candidate conflicting pairs.
+
+    Groups claims by shared entity and flags same-topic pairs that disagree
+    in polarity. Advisory only: with --dry-run (the default) this only
+    prints candidates. Without it, each surviving pair files a pending
+    `contradicts` relation proposal for a human `vouch approve` — it never
+    writes a Relation or a CONTESTED status itself.
+    """
+    store = _load_store()
+    with _cli_errors():
+        rows = contradictions_mod.scan(
+            store, threshold=threshold, entity=entity,
+            dry_run=dry_run, limit=limit, proposed_by=_whoami(),
+        )
+    if not rows:
+        click.echo("contradict-scan: no candidates found")
+        return
+    for r in rows:
+        line = (
+            f"{r['claim_a']} >< {r['claim_b']}  "
+            f"entity={r['entity']} score={r['score']:.3f}"
+        )
+        if "proposal_id" in r:
+            line += f"  proposal={r['proposal_id']}"
+        click.echo(line)
 
 
 @cli.group()
@@ -3455,20 +3978,114 @@ def detect_themes_cmd(
         )
 
 
+# --- hub sync (link/push/pull with a VouchHub) ------------------------------
+# These subcommands attach to the `hub` group defined above (the machine
+# registry); together they form the full `vouch hub …` surface.
+
+
+def _hub_link_or_die(store) -> hub_client.HubLink:
+    link = hub_client.load_link(store.kb_dir)
+    if link is None:
+        raise click.ClickException(
+            "this KB is not linked — run: vouch hub link <user>/<kb> --url https://hub…"
+        )
+    return link
+
+
+def _hub_token_or_die(url: str) -> str:
+    token = hub_client.resolve_token(url)
+    if not token:
+        raise click.ClickException(
+            f"no token for {url} — run `vouch hub link` again with --token, "
+            "or set VOUCH_HUB_TOKEN"
+        )
+    return token
+
+
+@hub.command("link")
+@click.argument("kb")  # user/slug on the hub
+@click.option("--url", required=True, help="Hub base url, e.g. https://hub.example.com")
+@click.option("--token", "token_opt", default=None, help="Sync token (vhp_…); prompted if absent.")
+def hub_link(kb: str, url: str, token_opt: str | None) -> None:
+    """Link this KB to USER/KB on a VouchHub and store the sync token."""
+    if kb.count("/") != 1:
+        raise click.ClickException("KB must be user/slug, e.g. alice/myproj")
+    store = _load_store()
+    token = token_opt or os.environ.get("VOUCH_HUB_TOKEN") or click.prompt(
+        "sync token (vhp_…)", hide_input=True
+    )
+    hub_client.save_token(url, token)
+    link = hub_client.HubLink(url=url, kb=kb)
+    hub_client.save_link(store.kb_dir, link)
+    _emit_json({"linked": True, "url": link.url, "kb": link.kb})
+
+
+@hub.command("push")
+def hub_push() -> None:
+    """Export approved knowledge (no sessions/config) and push it to the hub."""
+    store = _load_store()
+    link = _hub_link_or_die(store)
+    token = _hub_token_or_die(link.url)
+    try:
+        _emit_json(hub_client.push(store, link, token))
+    except hub_client.HubConflict as e:
+        _emit_json({"status": "conflicts", "conflicts": e.conflicts, "error": str(e)})
+        sys.exit(1)
+    except hub_client.HubError as e:
+        raise click.ClickException(str(e)) from e
+
+
+@hub.command("pull")
+def hub_pull() -> None:
+    """Pull the hub copy and file it as pending proposals for this KB's review.
+
+    Nothing lands durably here on pull: inbound knowledge becomes claim
+    proposals that must pass this KB's own review gate (`vouch review`).
+    """
+    store = _load_store()
+    link = _hub_link_or_die(store)
+    token = _hub_token_or_die(link.url)
+    try:
+        result = hub_client.pull(store, link, token)
+    except hub_client.HubError as e:
+        raise click.ClickException(str(e)) from e
+    _emit_json(result)
+
+
+@hub.command("status")
+def hub_status() -> None:
+    """Show the hub link and whether local knowledge matches the hub copy."""
+    store = _load_store()
+    link = hub_client.load_link(store.kb_dir)
+    if link is None:
+        _emit_json({"linked": False})
+        return
+    token = hub_client.resolve_token(link.url)
+    try:
+        _emit_json(hub_client.status(store, link, token))
+    except hub_client.HubError as e:
+        raise click.ClickException(str(e)) from e
+
+
 # --- export / import ------------------------------------------------------
 
 
 @cli.command()
 @click.option("--out", "out_path", required=True, type=click.Path(dir_okay=False))
-def export(out_path: str) -> None:
+@click.option("--exclude", "exclude_csv", default="",
+              help="Comma-separated artifact dirs to omit (e.g. sessions,decided).")
+def export(out_path: str, exclude_csv: str) -> None:
     """Bundle the durable KB into a portable .tar.gz."""
     store = _load_store()
-    manifest = bundle.export(store.kb_dir, dest=Path(out_path), actor=_whoami())
+    exclude = tuple(e.strip() for e in exclude_csv.split(",") if e.strip())
+    manifest = bundle.export(store.kb_dir, dest=Path(out_path), actor=_whoami(),
+                             exclude=exclude)
     _emit_json(
         {
             "bundle_id": manifest["bundle_id"],
             "files": len(manifest["files"]),
             "out": out_path,
+            "excluded": manifest["excluded"],
         }
     )
 
@@ -3530,6 +4147,76 @@ def import_apply_cmd(bundle_path: str, on_conflict: str) -> None:
     # Rebuild the index after a bulk import so search picks up new claims.
     health.rebuild_index(store)
     _emit_json(r)
+
+
+@cli.command("import-proposals")
+@click.argument("bundle_path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--origin-kb",
+    default=None,
+    help="Label for the source KB; defaults to the bundle's own instance id.",
+)
+def import_proposals_cmd(bundle_path: str, origin_kb: str | None) -> None:
+    """Import a bundle's knowledge as PENDING PROPOSALS for review.
+
+    The gated counterpart to import-apply: inbound claims are filed as proposals
+    that must pass this KB's own review gate, never written straight to the
+    durable store. This is the receiving-side gate federation requires -- nothing
+    lands without `vouch review`, so unlike import-apply it is safe to accept
+    knowledge from another KB with it.
+    """
+    store = _load_store()
+    try:
+        r = bundle.import_as_proposals(store.kb_dir, Path(bundle_path), origin_kb=origin_kb)
+    except RuntimeError as e:
+        raise click.ClickException(str(e)) from e
+    _emit_json(r)
+
+
+@cli.command("import-chatgpt")
+@click.argument(
+    "export_path", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--limit", type=int, default=None,
+    help="Import at most N conversations, in export order.",
+)
+@click.option("--dry-run", is_flag=True, help="Parse and report; file nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
+def import_chatgpt_cmd(
+    export_path: Path, limit: int | None, dry_run: bool, as_json: bool
+) -> None:
+    """Import a ChatGPT history export as PENDING session-page proposals.
+
+    Takes the data-export ZIP OpenAI mails out (or its conversations.json)
+    and files one review-gated session page per conversation -- every user
+    turn paired with the assistant turn that answered it, cited to a
+    per-conversation source. Re-importing is idempotent: unchanged
+    conversations are no-ops, grown ones refresh their PENDING proposal in
+    place, decided ones stay decided. Review with `vouch review`.
+    """
+    store = _load_store()
+    with _cli_errors():
+        report = chatgpt_import_mod.import_export(
+            store, export_path, limit=limit, dry_run=dry_run,
+            generated_at=datetime.now(UTC).isoformat(),
+        )
+    if as_json:
+        _emit_json(report)
+        return
+    verb = "would import" if dry_run else "imported"
+    _echo(
+        f"{report['conversations']} conversation(s) — {verb} "
+        f"{report['imported']} new, {report['updated']} updated, "
+        f"{report['skipped']} skipped"
+    )
+    for row in report["rows"]:
+        if row["action"] == "skipped":
+            continue
+        pid = row.get("proposal_id") or "(dry-run)"
+        _echo(f"  • {pid}  {row['title']}")
+    if not dry_run and (report["imported"] or report["updated"]):
+        _echo("run `vouch review` to decide.")
 
 
 # --- auto-pr: open N mergeable PRs against any github repo -----------------
@@ -3756,8 +4443,26 @@ def sync_check_cmd(source_path: str) -> None:
     show_default=True,
     type=click.Choice(["fail", "skip", "propose"]),
 )
-def sync_apply_cmd(source_path: str, on_conflict: str) -> None:
-    """Apply non-conflicting files from another .vouch directory or bundle."""
+@click.option(
+    "--as-proposals",
+    is_flag=True,
+    default=False,
+    help="Federation-safe: new inbound claims become pending proposals for review "
+    "instead of direct writes. Nothing lands without `vouch review`.",
+)
+@click.option(
+    "--origin-kb",
+    default=None,
+    help="Provenance label for the source KB (defaults to its instance id).",
+)
+def sync_apply_cmd(
+    source_path: str, on_conflict: str, as_proposals: bool, origin_kb: str | None
+) -> None:
+    """Apply files from another .vouch directory or bundle.
+
+    Default is a direct reconcile of your own KBs. Use --as-proposals to accept
+    another KB's knowledge through this KB's review gate (the federation path).
+    """
     store = _load_store()
     try:
         r = sync_mod.sync_apply(
@@ -3765,6 +4470,8 @@ def sync_apply_cmd(source_path: str, on_conflict: str) -> None:
             Path(source_path),
             on_conflict=on_conflict,
             actor=_whoami(),
+            as_proposals=as_proposals,
+            origin_kb=origin_kb,
         )
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e)) from e
@@ -4141,12 +4848,73 @@ def pr_cache_show(repo: str, state: str, limit: int, as_json: bool, cache_dir: s
 # --- install-mcp: drop the right adapter files into a project tree --------
 
 
-def _install_mcp_global(host: str, *, tier: str, approve: bool) -> None:
+def _offer_personal_fallback(personal_fallback: bool | None) -> None:
+    """The one-question opt-in after a --global install.
+
+    An already-registered personal KB is reported (and re-flagged only when
+    a flag was passed explicitly). Otherwise: an explicit flag decides; a
+    terminal gets ONE question (default no); non-interactive installs stay
+    off with a hint. Failures here never fail the install — the global
+    wiring already landed.
+    """
+    try:
+        entry = hub_mod.personal_entry()
+    except Exception:
+        entry = None
+    if entry is not None and (Path(entry.path) / ".vouch").is_dir():
+        root = Path(entry.path)
+        if personal_fallback is not None:
+            try:
+                hub_mod.set_personal_fallback(root, personal_fallback)
+            except (OSError, ValueError) as e:
+                click.echo(f"warning: could not update fallback flag: {e}", err=True)
+        state = "on" if hub_mod.personal_fallback_enabled(root) else "off"
+        click.echo(f"Personal KB: {entry.path} (fallback capture {state})")
+        return
+    wanted = personal_fallback
+    if wanted is None:
+        if sys.stdin.isatty():
+            wanted = click.confirm(
+                "Folders without a project KB currently don't capture at all. "
+                "Create a personal catch-all KB so they do? It is ONE store "
+                "shared by every KB-less folder — its knowledge is recalled in "
+                "all of them (`vouch adopt` moves a folder's share into a "
+                "project KB later)",
+                default=False,
+            )
+        else:
+            click.echo(
+                "Optional: `vouch hub init-personal --fallback` adds a "
+                "personal catch-all KB for folders without a project KB."
+            )
+            return
+    if not wanted:
+        return
+    try:
+        _init_personal_kb(True)
+    except Exception as e:
+        # The machine-wide wiring already landed and is what the command is
+        # for; a personal-KB failure is a warning with a retry, never a
+        # non-zero exit that reads as "the install failed".
+        message = e.message if isinstance(e, click.ClickException) else str(e)
+        click.echo(
+            f"warning: could not set up the personal KB: {message} — "
+            "the global install itself is complete; retry with "
+            "`vouch hub init-personal --fallback`.",
+            err=True,
+        )
+
+
+def _install_mcp_global(
+    host: str, *, tier: str, approve: bool, personal_fallback: bool | None = None
+) -> None:
     """The --global path: user-level wiring once, no project target at all.
 
-    Deliberately no KB bootstrap — there is no project here. Each session
-    resolves its own project's `.vouch` (run `vouch init` once per project);
-    a folder without one no-ops with a hint instead of capturing anywhere.
+    Deliberately no project-KB bootstrap — there is no project here. Each
+    session resolves its own project's `.vouch` (run `vouch init` once per
+    project); a folder without one no-ops with a hint — or, after the
+    one-question personal opt-in below, captures into the personal
+    catch-all KB instead.
     """
     try:
         result, target = install_mod.install_global(host, tier=tier, approve=approve)
@@ -4188,6 +4956,7 @@ def _install_mcp_global(host: str, *, tier: str, approve: bool) -> None:
             f"{len(result.failed)} file(s) could not be installed: "
             + ", ".join(result.failed)
         )
+    _offer_personal_fallback(personal_fallback)
 
 
 @cli.command(name="install-mcp", context_settings={"ignore_unknown_options": False})
@@ -4244,6 +5013,15 @@ def _install_mcp_global(host: str, *, tier: str, approve: bool) -> None:
     "(run `vouch init` once per project). Coexists safely with per-project "
     "installs.",
 )
+@click.option(
+    "--personal-fallback/--no-personal-fallback",
+    "personal_fallback",
+    default=None,
+    help="With --global: also create the personal catch-all KB so folders "
+    "without a project KB capture into it (adopt into a project later with "
+    "`vouch adopt`). Without either flag: one question on a terminal, "
+    "otherwise off.",
+)
 def install_mcp(
     host: str | None,
     list_hosts: bool,
@@ -4253,6 +5031,7 @@ def install_mcp(
     auto_init: bool,
     approve: bool,
     global_install: bool,
+    personal_fallback: bool | None,
 ) -> None:
     """Install vouch into HOST (claude-code, cursor, …) idempotently.
 
@@ -4289,8 +5068,16 @@ def install_mcp(
                 "--global is machine-wide; --path/--target do not apply "
                 "(each project's KB comes from `vouch init` in that project)"
             )
-        _install_mcp_global(host, tier=tier, approve=approve)
+        _install_mcp_global(
+            host, tier=tier, approve=approve, personal_fallback=personal_fallback
+        )
         return
+
+    if personal_fallback is not None:
+        raise click.UsageError(
+            "--personal-fallback/--no-personal-fallback only applies with "
+            "--global (per-project installs capture into the project KB)"
+        )
 
     target = Path(target_alias or path).resolve()
     if host in hosts and install_mod.wants_kb_bootstrap(host):
@@ -4723,6 +5510,134 @@ def openclaw_rpc() -> None:
     from .openclaw import rpc as openclaw_rpc_mod
 
     raise SystemExit(openclaw_rpc_mod.run_stdio())
+
+
+@cli.group()
+def bench() -> None:
+    """Seeded, judge-free memory benchmark over the real pipeline.
+
+    A dataset is a pure function of its seed; grading is substring checks
+    against a typed answer key with forbidden-value zeroing. Runs in a
+    throwaway KB — no existing .vouch/ is read or written.
+    """
+
+
+@bench.command("run")
+@click.option("--seed", default=1, show_default=True, type=int)
+@click.option(
+    "--seeds", default=None,
+    help="Comma-separated seed list; reports mean composite with a standard error.",
+)
+@click.option("--budget-chars", default=None, type=int, help="Context pack budget.")
+@click.option("--limit", default=None, type=int, help="Max context items per query.")
+@click.option(
+    "--strategy", "strategy_path", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Score with this ranking strategy file, sandboxed exactly like CI.",
+)
+@click.option(
+    "--against", "against_path", default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Champion strategy file to pair against; prints the dethrone verdict.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the full report as JSON.")
+def bench_run(
+    seed: int, seeds: str | None, budget_chars: int | None,
+    limit: int | None, strategy_path: str | None, against_path: str | None,
+    as_json: bool,
+) -> None:
+    """Score retrieval on a generated dataset.
+
+    \b
+    Examples:
+      vouch bench run --seed 7
+      vouch bench run --seeds 1,2,3,4,5 --json
+      vouch bench run --seeds 1,2,3 --strategy contrib/strategies/mine.py \\
+          --against contrib/strategies/baseline.py
+    """
+    from . import bench as bench_mod
+
+    budget = budget_chars if budget_chars is not None else bench_mod.DEFAULT_BUDGET_CHARS
+    top_k = limit if limit is not None else bench_mod.DEFAULT_LIMIT
+    if against_path and not strategy_path:
+        raise click.UsageError("--against requires --strategy")
+    strategy = None
+    if strategy_path:
+        from .strategy import SandboxProxy
+
+        strategy = SandboxProxy(strategy_path)
+    seed_list = (
+        [int(s) for s in seeds.replace(" ", "").split(",") if s]
+        if seeds else [seed]
+    )
+    if against_path:
+        champion = SandboxProxy(against_path)
+        champion_scores = [
+            bench_mod.run(
+                s, budget_chars=budget, limit=top_k, strategy=champion,
+            )["composite"]
+            for s in seed_list
+        ]
+        challenger_scores = [
+            bench_mod.run(
+                s, budget_chars=budget, limit=top_k, strategy=strategy,
+            )["composite"]
+            for s in seed_list
+        ]
+        verdict = bench_mod.paired_verdict(champion_scores, challenger_scores)
+        verdict["seeds"] = seed_list
+        if as_json:
+            click.echo(json.dumps(verdict, indent=2))
+            return
+        click.echo(
+            f"challenger {verdict['challenger']['mean']:.4f}  "
+            f"champion {verdict['champion']['mean']:.4f}  "
+            f"diff {verdict['mean_diff']:+.4f}  band {verdict['band']:.4f}"
+        )
+        click.echo("DETHRONED" if verdict["dethroned"] else "held")
+        return
+    if seeds:
+        report = bench_mod.run_seeds(
+            seed_list, budget_chars=budget, limit=top_k, strategy=strategy,
+        )
+        if as_json:
+            click.echo(json.dumps(report, indent=2))
+            return
+        click.echo(
+            f"seeds {seed_list}: composite "
+            f"{report['composite_mean']:.2f} ± {report['composite_se']:.2f} (SE)"
+        )
+        for name, mean in report["categories"].items():
+            click.echo(f"  {name:<24} {mean:>5.2f}")
+        return
+    report = bench_mod.run(seed, budget_chars=budget, limit=top_k, strategy=strategy)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(bench_mod.format_report(report))
+
+
+@bench.command("gen")
+@click.option("--seed", default=1, show_default=True, type=int)
+def bench_gen(seed: int) -> None:
+    """Print the generated dataset for a seed (sessions + answer key)."""
+    from . import bench as bench_mod
+
+    dataset = bench_mod.generate(seed)
+    payload = {
+        "seed": dataset.seed,
+        "sessions": [
+            {"title": t, "text": text} for t, text in dataset.sessions
+        ],
+        "cases": [
+            {
+                "category": c.category, "question": c.question,
+                "expected": c.expected, "forbidden": list(c.forbidden),
+            }
+            for c in dataset.cases
+        ],
+    }
+    click.echo(json.dumps(payload, indent=2))
 
 
 if __name__ == "__main__":

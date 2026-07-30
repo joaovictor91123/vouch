@@ -6,6 +6,194 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **vault sync mirrors post-approve WORKING/DRAFT artifacts** (#583):
+  `kb_to_vault` now includes durable `WORKING` claims and `DRAFT` pages
+  (the propose+approve defaults), so Obsidian mirrors fill without
+  hand-editing status. `ARCHIVED` pages and retracted claims stay out,
+  and stale *mirror-owned* files are deleted (untracked user markdown
+  under the vault house is preserved) so the vault cannot keep serving
+  dead knowledge.
+- **hot-memory sidebar still fills after exclude_ids** (#597): compute_hot_memory used to truncate to limit then drop excluded ids, so search/context sidebars under-filled whenever hit ids overlapped the hot set. exclusions are applied while ranking so the sidebar still returns up to limit other recent claims.
+- **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
+  `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
+  longer raises `AttributeError` while building the docker command.
+- **`kb.session_transcript`'s degraded-path test no longer depends on an
+  ambient KB**: it called `handle_request` against whatever `.vouch/` the
+  cwd happened to sit under, so it passed on a developer checkout and
+  failed in CI — where `.vouch/` is gitignored — with an `internal_error`
+  from `_store()`. it now chdirs into a fixture KB and points both
+  transcript locators at empty dirs, so the absence it asserts is the
+  raw transcript's.
+- **`kb.search` excludes retracted claims and archived pages** (#581):
+  `search_kb` now drops `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims and
+  `ARCHIVED` pages the same way `kb.context` already does, so lifecycle
+  controls are not decorative on the detail-search surface. backends
+  over-fetch a candidate pool before that filter so retracted top-hits
+  cannot starve the requested result limit.
+- **bench grading saw highlight markup**: retrieval wraps query-matched
+  terms in guillemets, which broke the bench's substring checks exactly
+  on query-relevant claims — expected values read as missing (deflating
+  recall categories) and highlighted forbidden values slipped past the
+  zeroing (inflating dump-guard categories). grading now strips the
+  markers; absolute bench scores shift, paired comparisons were fair
+  either way. the reference baseline table is refreshed.
+### Changed
+- **auto approval is the default** (`review.approver_role: trusted-agent`
+  in the starter config): a fresh KB approves the capturing agent's
+  proposals with no human step. nothing bypasses the gate — every write
+  still flows through `proposals.approve()` with one audit event and the
+  `auto_approved` stamp; the new `proposals.auto_approve_pending` drain
+  (run from capture finalize) clears claims, pages, entities and
+  relations, rejects duplicates, and still holds protected page kinds,
+  dead-reference pages, id conflicts and delete proposals for a
+  reviewer. remove `approver_role` from `config.yaml` to put writes back
+  behind `vouch review`.
+
+### Added
+- **shipped ranking champion** (`vouch.strategies.provenance`): the
+  engine-lane winner (provenance-aware ranking — hearsay and stored
+  instructions demoted, change-of-state phrasing boosted) now ships in
+  the package. new KBs get it via the starter config
+  (`retrieval.strategy`); existing KBs keep byte-identical ordering until
+  they add the key, and `strategy: null` opts out. the competition
+  champion `contrib/strategies/baseline.py` delegates to it, so
+  challengers now have to beat real ranking, not identity order. with a
+  strategy active, retrieval over-fetches a bounded candidate pool and
+  the strategy's top-`limit` survive — de-prioritising below the window
+  genuinely excludes a candidate from the pack.
+- **session-mode answer memory** (`capture.answer_mode`, default `session`):
+  claims are extracted once at SessionEnd from the full transcript history
+  (`capture_session_answers`, wired into `capture finalize`) instead of on
+  every Stop hook. per-turn extraction saw one answer at a time, which is
+  where single-turn fragments like "… are noted at the end" came from; the
+  session document gives the extractor every turn at once, collapses
+  duplicate spans across turns, and spends one `max_claims` budget per
+  session rather than per turn. `capture.answer_mode: turn` restores the
+  legacy per-turn behaviour; the Stop hook stays wired either way (it defers
+  with `deferred-to-session-end` in session mode).
+- **an admission gate that filters knowledge-shaped garbage before it is
+  filed** (`admission:` config). every ingestion path funnels through
+  `proposals._file_proposal`, so a single provenance-keyed predicate there
+  raises the floor with no drift across surfaces. it is deterministic and
+  receipt-safe — it rejects verbatim payloads, never rewrites them, so
+  byte-offset receipts stay intact. a claim that is a markdown heading, a
+  colon lead-in, or a truncated code-span/bracket is refused, as is an
+  uncited `type: session`/`log` page (a session diary, not durable
+  knowledge). only the passive auto-capture actors (`vouch-capture`,
+  `session-split`, `codex`) are blocked; a deliberate author's write stays
+  advisory and reaches the review gate untouched. tunable via
+  `admission.{enabled, min_confidence, reject_uncited_session_pages}`.
+- **`vouch rejected`** — list rejected proposals (with `--admission` to show
+  only gate auto-rejections). auto-rejections are recorded
+  (`decided_by: vouch-admission`) and never deleted, so a false positive is
+  always recoverable.
+
+### Deprecated
+- the auto-captured session-page pipeline is now a no-op for auto-capture
+  actors: `capture.finalize`'s session summary, `session_split` renarrate,
+  `codex_rollout` reingest, and the SessionStart review banner all produced
+  uncited `type: session` pages, which the admission gate now auto-rejects.
+  removal of the dead machinery is a follow-up.
+
+### Changed
+- **the per-prompt hook now lets the model decide how much of a turn
+  vouch takes** (`retrieval.prompt_gate`). recall used to inject an
+  unconditional "open with From vouch memory:" block on *every* prompt,
+  so "fix the failing test" spent its reply opener announcing a memory
+  search nobody asked for. rather than have the hook guess the prompt's
+  intent with a verb list (which never covers the next phrasing), it now
+  hands the host model ONE conditional instruction and lets the model —
+  which already reads the prompt — choose per turn: a *question* the
+  items answer opens with "From vouch memory:" and quotes them; a *task*
+  (fix / build / change / run anything, known verb or not) uses them
+  silently as background, citing an id inline only where relied on, with
+  no banner; *irrelevant* items are ignored. on a miss the same judgment
+  applies — "Nothing in vouch on this." for a question, silence for a
+  task. chatter with no informative tokens ("ok thanks", "which one is
+  better?") injects nothing at all (retrieval ORs every query token, so
+  those matched noise on `one`). no per-turn model call and no latency —
+  the decision rides in the instruction text the model already
+  processes; it generalizes to any phrasing or language because it no
+  longer depends on recognizing the verb. compliance measured on real
+  `claude -p` across haiku / sonnet / opus (KB-backed block): coding
+  tasks are never wrongly announced. new KBs get it on; existing KBs
+  keep the unconditional block until they add the key.
+- **personal catch-all KB + `vouch adopt`** (global vouch, phase 3):
+  `vouch hub init-personal` creates and registers a personal KB at
+  `~/.local/share/vouch/personal` (`XDG_DATA_HOME` honoured;
+  `VOUCH_PERSONAL_KB` overrides). with its opt-in flag on
+  (`personal.fallback_capture` in the KB's own config — one question at
+  `install-mcp --global`, or `--personal-fallback`, or `vouch hub
+  fallback on`), sessions in folders WITHOUT a project KB capture into
+  it instead of nowhere: every captured source records the folder it
+  came from (`metadata.origin_path`), the session-start banner announces
+  the routing, and per-prompt recall in those folders reads the same KB
+  back. strictly double-opt-in (registry role `personal` + the KB's own
+  config flag) and fail-closed: no personal KB, no flag, a corrupt
+  registry, or a guard refusal (discovery landing on a personal KB from
+  below — the hijack shape) all mean capture stays off exactly as
+  before. `vouch adopt`, run inside a project that now has its own KB,
+  drains those captures home THROUGH the project's review gate: sources
+  copy byte-identically (content-addressed ids are stable across KBs),
+  each live personal claim is re-proposed against the copied source, its
+  byte-offset receipt re-verifies mechanically, and the project's own
+  review config decides durability — auto-approve on receipt where
+  enabled, pending for a human otherwise; adoption never bypasses
+  review. idempotent in both directions (a claim already durable *or*
+  already queued in the project is skipped, so re-running never doubles
+  the review queue); `--dry-run` previews against the project's real
+  gate; `--from-path` adopts a moved project's captures; `--retire`
+  archives only the personal copies that actually landed durable —
+  retiring a merely-pending one would strand it if the proposal is
+  later rejected or expires; session rollups are reported, not moved
+  (an unreviewed summary is not knowledge yet, so it stays where it was
+  filed); both KBs log a `kb.adopt` audit event carrying the other
+  side's id. the personal KB is ONE store shared by every KB-less
+  folder — recall there reads all of it, and the digest header, the
+  per-prompt block, the session banner, `vouch status` and the opt-in
+  question all say so rather than calling it "this repo's" knowledge.
+
+### Fixed
+- `sync_vault` catches the `ProposalError` that `propose_page` raises for a
+  deleted citation (missing claim/entity/source id, with
+  `ArtifactNotFoundError` as cause), not just the raw
+  `ArtifactNotFoundError`. other proposal failures (empty title, page-kind
+  validation) surface as a neutral `vault edit rejected` `VaultSyncError`
+  rather than being mislabelled as an unknown artifact. the CLI's
+  `except VaultSyncError` renderer then prints a one-line `Error:` instead
+  of an uncaught traceback (#547).
+- `clear` reads a naive `before` as utc instead of raising. a date-only
+  cutoff — `2026-07-01`, the shape the cli help, the console's own error
+  text, and the `kb.clear` docs all advertise — parses naive, and comparing
+  it against a claim's aware `created_at` raised `TypeError`: a traceback
+  from `vouch claims-clear --before`, an error response over mcp/jsonl, and
+  an unhandled 500 on the review console's `/clear-claims`. normalised at
+  the `lifecycle.clear_claims` chokepoint, so all four surfaces are fixed
+  at once; the audit event records the normalised cutoff.
+### Added
+- **ingest selection knob (`vouch ingest --max-claims / --budget-chars`).**
+  capture used to file every substantive sentence of a source — complete,
+  but a restatement of the whole document rather than the facts worth a
+  claim. `extract.select_spans` ranks candidate spans by information density
+  (sum over distinct content words of `1 / document-frequency`, so rare
+  specific terms outweigh stopword-heavy filler) and keeps the best under a
+  claim-count or character budget. it is deterministic and llm-free — and it
+  only ever returns a *subset* of the verbatim spans, never a paraphrase, so
+  every kept claim's receipt still verifies by construction. unset, ingest
+  keeps every span exactly as before (the unbudgeted baseline is unchanged).
+  this is the selection step the compiler thesis needs: fewer, denser claims
+  are what move accuracy-per-token against the grep baseline.
+
+### Fixed
+- **extraction no longer fractures dotted numbers.** `segment_source` split
+  on every `.`, so a version or decimal (`6.8.3`, `3.14`) was broken across
+  segment boundaries and its answer atom fell out of every span — measured at
+  ~11% of the ground-truth facts lost on a synthetic lookup corpus *before any
+  budget was applied*. a `.` flanked by digits is now kept inside the span
+  (sentence-ending periods are unaffected), lifting the recall ceiling of the
+  whole ingest pipeline from 89% to 100% of facts on that corpus.
+
 ## [1.5.0] — 2026-07-20
 
 ### Added
@@ -190,6 +378,34 @@ All notable changes to vouch are documented here. Format follows
   in config.yaml (#476).
 
 ### Fixed
+- secret masking now catches JSON/quoted-key credentials
+  (`"password": "..."`, `'api_key': '...'`). the key's closing quote sat
+  between the name and the `:` and broke the assignment regex, so the most
+  common structured secret shape — and exactly the file family vouch writes
+  (settings.json, quoted yaml) — slipped through `capture.observe` into the
+  gitignored buffer that rolls into a committed session page and the
+  append-only audit log. the value is masked and the key/quotes kept legible (#549).
+- `propose-claim`, `propose-relation`, and `propose-entity` now validate
+  the payload against the Claim/Relation/Entity model at propose time
+  instead of only at approve. an out-of-range `--confidence` or an
+  invalid entity/relation type used to file a proposal that could never
+  pass `approve()`, sitting stuck in the pending queue with no clear way
+  to fix it; it is now rejected immediately with the same error message
+  approve would have raised.
+- `pr_bot` core-path classification: `trust-gate.yml`, `auto-merge.yml`,
+  and `comment-command.yml` now source the changed-file list from the REST
+  `pulls/{n}/files` endpoint instead of `gh pr view --json files`, and feed
+  both the new and previous filename into classification. the GraphQL-backed
+  shortcut carries no rename metadata, so a `git mv` of a `CORE_GLOBS` path
+  (e.g. `http_server.py`) made the file invisible to the trust gate and
+  auto-merge arm check. (#505)
+- `vouch lint` no longer flags retired claims as stale. a
+  superseded/archived/redacted claim past the freshness window was
+  reported as a `stale_claim` warning even though it is terminal and not
+  expected to be refreshed — non-actionable noise in the sweep documented
+  as the user-actionable subset. lint now exempts retired statuses,
+  matching the exemption `vouch metrics` and `vouch digest` already made
+  (#478, #484).
 - approve/reject/expire record the audit event *before* moving the
   proposal to decided/. a crash between the two used to leave a durable
   decision with no authoritative history; it now leaves a pending
@@ -307,6 +523,14 @@ All notable changes to vouch are documented here. Format follows
 - demo: dual-path llm configuration — compile & summarize run through
   session-capture replay or directly against the api via a stdlib shim
   wired as `compile.llm_cmd` with a byo `ANTHROPIC_API_KEY`.
+- `vouch contradict-scan` — an offline scanner that groups approved claims
+  by shared entity and heuristically flags same-topic pairs that disagree
+  in polarity. `--dry-run` (default) only prints candidates; without it,
+  each surviving pair files a pending `contradicts` relation proposal via
+  `proposals.propose_relation` for a human `vouch approve` — the scanner
+  itself never writes a `Relation` or a `CONTESTED` status. `--threshold`,
+  `--entity`, and `--limit` tune the scan. scoring lives in the new
+  `src/vouch/contradictions.py`. (#314)
 
 ### Changed
 - ``kb.list_*`` JSONL/MCP responses now use a dict envelope

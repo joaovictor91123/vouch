@@ -31,6 +31,13 @@ def test_load_config_reads_override(store: KBStore) -> None:
     assert cfg.min_observations == 5
 
 
+def test_load_config_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool("false") is True in plain Python, so a mistakenly
+    quoted `enabled: "false"` previously silently kept capture enabled."""
+    store.config_path.write_text('capture:\n  enabled: "false"\n')
+    assert cap.load_config(store).enabled is False
+
+
 def test_buffer_path_under_captures_dir(store: KBStore) -> None:
     p = cap.buffer_path(store, "sess-123")
     assert p == store.kb_dir / "captures" / "sess-123.jsonl"
@@ -300,21 +307,28 @@ def _seed(store: KBStore, sid: str, n: int) -> None:
         cap.observe(store, sid, tool="Edit", summary=f"Edited f{i}.py", now=float(i))
 
 
-def test_finalize_files_one_pending_page(store: KBStore, tmp_path: Path) -> None:
+def test_finalize_files_one_auto_rejected_page(store: KBStore, tmp_path: Path) -> None:
     from vouch.models import ProposalKind, ProposalStatus
 
     _seed(store, "s1", 3)
     result = cap.finalize(store, "s1", cwd=tmp_path)
     pid = result["summary_proposal_id"]
     assert pid is not None
-    pend = store.list_proposals(ProposalStatus.PENDING)
-    match = [p for p in pend if p.id == pid]
+    # an uncited session page from an auto-capture actor is filed then
+    # immediately auto-rejected by admission: it never lands in the pending
+    # queue, but the same mechanical page is what finalize returns.
+    assert store.list_proposals(ProposalStatus.PENDING) == []
+    rej = store.list_proposals(ProposalStatus.REJECTED)
+    match = [p for p in rej if p.id == pid]
     assert len(match) == 1
     pr = match[0]
     assert pr.kind == ProposalKind.PAGE
     assert pr.proposed_by == cap.CAPTURE_ACTOR
     assert pr.payload["type"] == cap.CAPTURE_PAGE_TYPE
-    assert pr.status == ProposalStatus.PENDING
+    assert pr.status == ProposalStatus.REJECTED
+    assert pr.decided_by == "vouch-admission"
+    assert pr.decision_reason.startswith("admission:")
+    assert store.get_proposal(pid).status == ProposalStatus.REJECTED
 
 
 def test_finalize_below_min_files_nothing(store: KBStore, tmp_path: Path) -> None:
@@ -421,15 +435,28 @@ def test_finalize_reads_transcript_for_title(store: KBStore, tmp_path: Path) -> 
         encoding="utf-8",
     )
     cap.finalize(store, "s1", cwd=tmp_path, transcript_path=transcript)
-    pend = store.list_proposals(ProposalStatus.PENDING)
-    assert len(pend) == 1
-    assert pend[0].payload["title"] == "session: ship the digest"
+    # the uncited session page is auto-rejected by admission, but the title is
+    # still built from the transcript's first prompt before it is filed.
+    rej = store.list_proposals(ProposalStatus.REJECTED)
+    assert len(rej) == 1
+    assert rej[0].payload["title"] == "session: ship the digest"
 
 
-def test_pending_count_counts_capture_actor(store: KBStore, tmp_path: Path) -> None:
+def test_capture_page_auto_rejected_not_counted_pending(
+    store: KBStore, tmp_path: Path
+) -> None:
+    from vouch.models import ProposalStatus
+
     _seed(store, "s1", 3)
     cap.finalize(store, "s1", cwd=tmp_path)
-    assert cap.pending_count(store) == 1
+    # the auto-captured session page is auto-rejected by admission, so it never
+    # counts toward the pending-review banner.
+    assert cap.pending_count(store) == 0
+    rej = store.list_proposals(ProposalStatus.REJECTED)
+    assert len(rej) == 1
+    assert rej[0].proposed_by == cap.CAPTURE_ACTOR
+    assert rej[0].status == ProposalStatus.REJECTED
+    assert rej[0].decided_by == "vouch-admission"
 
 
 import json as _json  # noqa: E402
@@ -471,17 +498,26 @@ def test_cli_finalize_files_proposal(store: KBStore) -> None:
     payload = _json.dumps({"session_id": "cc-2", "cwd": str(store.kb_dir.parent)})
     res = _run(store, ["capture", "finalize"], stdin=payload)
     assert res.exit_code == 0
-    pend = store.list_proposals(ProposalStatus.PENDING)
-    assert any(p.proposed_by == cap.CAPTURE_ACTOR for p in pend)
+    # the CLI files the session page through the same admission gate: an
+    # uncited capture-actor page is auto-rejected, not left pending.
+    assert not any(
+        p.proposed_by == cap.CAPTURE_ACTOR
+        for p in store.list_proposals(ProposalStatus.PENDING)
+    )
+    rej = store.list_proposals(ProposalStatus.REJECTED)
+    assert any(p.proposed_by == cap.CAPTURE_ACTOR for p in rej)
 
 
-def test_cli_banner_emits_when_pending(store: KBStore) -> None:
+def test_cli_banner_silent_after_capture_auto_rejected(store: KBStore) -> None:
     for i in range(3):
         cap.observe(store, "cc-3", tool="Edit", summary=f"Edited f{i}.py", now=float(i))
     cap.finalize(store, "cc-3", cwd=store.kb_dir.parent)
+    # the session page was auto-rejected by admission, so nothing awaits review:
+    # the SessionStart banner stays silent rather than announcing a pending page.
+    assert store.list_proposals(ProposalStatus.REJECTED)
     res = _run(store, ["capture", "banner"])
     assert res.exit_code == 0
-    assert "awaiting review" in res.output
+    assert "awaiting review" not in res.output
 
 
 def test_cli_banner_silent_when_none(store: KBStore) -> None:
@@ -507,6 +543,7 @@ def test_adapter_settings_wires_capture_hooks() -> None:
     assert any("capture observe" in c for c in commands("PostToolUse"))
     assert any("capture finalize" in c for c in commands("SessionEnd"))
     assert any("capture banner" in c for c in commands("SessionStart"))
+    assert any("capture finalize-all" in c for c in commands("SessionStart"))
 
 
 def test_capture_finalize_all_cmd_with_old_buffers(tmp_path: Path, monkeypatch) -> None:
@@ -581,6 +618,58 @@ def test_capture_finalize_all_cmd_silent_on_no_kb(tmp_path: Path, monkeypatch) -
 
     # Should exit 0, not fail
     assert result.exit_code == 0
+
+
+def test_capture_finalize_all_cmd_reads_session_from_stdin_payload(store: KBStore) -> None:
+    """Regression for issue #492: the shipped SessionStart hook passes no
+    --session-id and sets no VOUCH_SESSION_ID env var, so the command must
+    read the session id off the stdin hook payload, the same way
+    `capture finalize` already does at SessionEnd."""
+    current_sess = "from-stdin"
+    curr_path = cap.buffer_path(store, current_sess)
+    curr_path.parent.mkdir(parents=True, exist_ok=True)
+    curr_path.write_text('{"ts": 1.0, "tool": "Read", "summary": "test"}\n')
+
+    payload = _json.dumps({"session_id": current_sess})
+    res = _run(store, ["capture", "finalize-all"], stdin=payload)
+
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert current_sess in output["skipped_current"]
+
+
+def test_capture_finalize_all_cmd_session_id_option_overrides_stdin_payload(
+    store: KBStore,
+) -> None:
+    """--session-id stays authoritative over the stdin payload when both
+    are present, matching capture_finalize_cmd's own precedence."""
+    option_sess = "from-option"
+    payload_sess = "from-payload"
+    for sess in (option_sess, payload_sess):
+        p = cap.buffer_path(store, sess)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"ts": 1.0, "tool": "Read", "summary": "test"}\n')
+
+    payload = _json.dumps({"session_id": payload_sess})
+    res = _run(
+        store, ["capture", "finalize-all", "--session-id", option_sess], stdin=payload
+    )
+
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert option_sess in output["skipped_current"]
+    assert payload_sess not in output["skipped_current"]
+
+
+def test_capture_finalize_all_cmd_no_session_id_anywhere_is_noop(store: KBStore) -> None:
+    """No --session-id, no stdin payload, no env var: stays a silent no-op,
+    matching the pre-fix contract for genuinely session-less invocations."""
+    res = _run(store, ["capture", "finalize-all"], stdin="")
+    assert res.exit_code == 0
+    output = _json.loads(res.output)
+    assert output["finalized"] == []
+    assert output["skipped_recent"] == []
+    assert output["skipped_current"] == []
 
 
 def test_is_stale_buffer_with_recent_file(tmp_path):
@@ -777,10 +866,12 @@ def test_finalize_all_except_returns_proposal_ids(tmp_path):
     )
 
     assert old_sess in result["finalized"]
-    # Verify a proposal was created
+    # Verify a proposal was created — the uncited session page is filed then
+    # auto-rejected by admission, landing in the rejected queue, not pending.
     from vouch.models import ProposalStatus
-    pending = store.list_proposals(ProposalStatus.PENDING)
-    assert len(pending) > 0
+    assert store.list_proposals(ProposalStatus.PENDING) == []
+    rejected = store.list_proposals(ProposalStatus.REJECTED)
+    assert len(rejected) > 0
 
 
 def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
@@ -813,9 +904,10 @@ def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
     assert old_sess in cleanup_result["finalized"]
     assert not old_path.exists()
 
-    # Verify old session was proposed
-    pending_before = store.list_proposals(ProposalStatus.PENDING)
-    old_proposals = [p for p in pending_before if p.session_id == old_sess]
+    # Verify old session was filed and auto-rejected by admission (uncited
+    # session page from an auto-capture actor never becomes pending)
+    rejected_before = store.list_proposals(ProposalStatus.REJECTED)
+    old_proposals = [p for p in rejected_before if p.session_id == old_sess]
     assert len(old_proposals) == 1
 
     # 2. SessionEnd finalize (current session)
@@ -826,10 +918,171 @@ def test_capture_e2e_sessionstart_cleanup_then_finalize(tmp_path):
     assert finalize_result["summary_proposal_id"] is not None
     assert not new_path.exists()
 
-    # Verify new session was proposed
-    pending_after = store.list_proposals(ProposalStatus.PENDING)
-    new_proposals = [p for p in pending_after if p.session_id == new_sess]
+    # Verify new session was filed and auto-rejected too
+    rejected_after = store.list_proposals(ProposalStatus.REJECTED)
+    new_proposals = [p for p in rejected_after if p.session_id == new_sess]
     assert len(new_proposals) == 1
 
-    # Total proposals: old + new
-    assert len(pending_after) >= 2
+    # Total proposals: old + new, both auto-rejected
+    assert len(rejected_after) >= 2
+
+
+# --- personal-KB fallback capture through the hook CLI (phase 3) -----------
+
+
+def _turn_mode(store: KBStore) -> None:
+    """Pin the legacy per-turn answer path — these tests exercise the Stop-hook
+    CLI routing, which only files anything under capture.answer_mode: turn."""
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg.setdefault("capture", {})["answer_mode"] = "turn"
+    store.config_path.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+
+@pytest.fixture()
+def _fallback_machine(tmp_path_factory, monkeypatch):
+    """Fake home + registry + an opted-in personal KB; returns its store."""
+    from vouch import hub
+
+    fake_home = tmp_path_factory.mktemp("fbhome")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv(hub.REGISTRY_ENV, str(fake_home / "registry.yaml"))
+    monkeypatch.delenv("VOUCH_KB_PATH", raising=False)
+    monkeypatch.delenv("VOUCH_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv(hub.PERSONAL_KB_ENV, raising=False)
+    root = hub.personal_kb_root()
+    assert root is not None
+    personal = KBStore.init(root)
+    _turn_mode(personal)
+    hub.register_kb(root, role="personal", actor="t")
+    hub.set_personal_fallback(root, True)
+    return personal
+
+
+def _long_transcript(tmp_path: Path) -> Path:
+    transcript = tmp_path / "fb-transcript.jsonl"
+    answer = (
+        "The deploy cadence for this service is every second Tuesday. "
+        "The staging environment refreshes nightly at 02:00 UTC. "
+        "Rollbacks use the blue-green switch, never an old tag."
+    )
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "deploy cadence?"}]}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": answer}]}},
+    ]
+    transcript.write_text(
+        "\n".join(_json.dumps(entry) for entry in lines), encoding="utf-8"
+    )
+    return transcript
+
+
+def test_answer_cli_falls_back_to_personal_kb(
+    _fallback_machine: KBStore, tmp_path: Path, monkeypatch
+) -> None:
+    """A Stop hook firing in a KB-less folder captures into the personal KB,
+    origin recorded — the whole point of the phase 3 fallback."""
+    personal = _fallback_machine
+    nowhere = tmp_path / "no-kb-project"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    transcript = _long_transcript(tmp_path)
+    payload = _json.dumps({
+        "session_id": "fb-1",
+        "transcript_path": str(transcript),
+        "cwd": str(nowhere),
+    })
+    result = CliRunner().invoke(cli, ["capture", "answer"], input=payload)
+    assert result.exit_code == 0, result.output
+    out = _json.loads(result.output)
+    assert out["captured"] is True
+    src = personal.get_source(out["source"])
+    assert src.metadata["origin_path"] == str(nowhere)
+    assert "personal-fallback" in src.tags
+
+
+def test_answer_cli_project_kb_capture_has_no_origin(
+    _fallback_machine: KBStore, tmp_path: Path, monkeypatch
+) -> None:
+    """A project-KB capture is NOT a fallback: no origin stamp, no tag."""
+    proj = tmp_path / "realproj"
+    store = KBStore.init(proj)
+    _turn_mode(store)
+    monkeypatch.chdir(proj)
+    transcript = _long_transcript(tmp_path)
+    payload = _json.dumps({
+        "session_id": "fb-2",
+        "transcript_path": str(transcript),
+        "cwd": str(proj),
+    })
+    result = CliRunner().invoke(cli, ["capture", "answer"], input=payload)
+    assert result.exit_code == 0, result.output
+    out = _json.loads(result.output)
+    src = store.get_source(out["source"])
+    assert "origin_path" not in src.metadata
+    assert "personal-fallback" not in src.tags
+
+
+def test_banner_cli_announces_fallback(
+    _fallback_machine: KBStore, tmp_path: Path, monkeypatch
+) -> None:
+    nowhere = tmp_path / "no-kb-project"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    payload = _json.dumps({"session_id": "fb-3", "cwd": str(nowhere)})
+    result = CliRunner().invoke(cli, ["capture", "banner"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert "personal KB" in result.output
+    assert "vouch adopt" in result.output
+
+
+def test_observe_cli_buffers_in_personal_kb_on_fallback(
+    _fallback_machine: KBStore, tmp_path: Path, monkeypatch
+) -> None:
+    personal = _fallback_machine
+    nowhere = tmp_path / "no-kb-project"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    payload = _json.dumps({
+        "session_id": "fb-4",
+        "cwd": str(nowhere),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(nowhere / "a.py")},
+        "tool_response": "ok",
+    })
+    result = CliRunner().invoke(cli, ["capture", "observe"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert cap.buffer_path(personal, "fb-4").exists()
+
+
+def test_fallback_off_captures_nowhere(
+    _fallback_machine: KBStore, tmp_path: Path, monkeypatch
+) -> None:
+    from vouch import hub
+
+    personal = _fallback_machine
+    hub.set_personal_fallback(personal.root, False)
+    nowhere = tmp_path / "no-kb-project"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    transcript = _long_transcript(tmp_path)
+    payload = _json.dumps({
+        "session_id": "fb-5",
+        "transcript_path": str(transcript),
+        "cwd": str(nowhere),
+    })
+    result = CliRunner().invoke(cli, ["capture", "answer"], input=payload)
+    assert result.exit_code == 0
+    assert result.output.strip() == ""  # no capture happened anywhere
+    assert not list((personal.kb_dir / "sources").glob("*/meta.yaml")) or all(
+        "origin_path" not in s.metadata for s in personal.list_sources()
+    )
+    # and the banner shows the plain no-KB hint, not the fallback line
+    banner = CliRunner().invoke(
+        cli, ["capture", "banner"],
+        input=_json.dumps({"session_id": "fb-5", "cwd": str(nowhere)}),
+    )
+    assert "run `vouch init` here to enable durable memory" in banner.output

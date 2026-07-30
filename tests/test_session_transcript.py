@@ -196,7 +196,36 @@ def test_handler_bad_agent_is_invalid_request() -> None:
     assert resp["error"]["code"] == "invalid_request"
 
 
-def test_handler_returns_degraded_when_absent() -> None:
+def test_handler_returns_degraded_when_absent(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch.jsonl_server import handle_request
+
+    # handle_request discovers the KB via cwd; point both agent search roots
+    # at empty dirs so the locator misses and returns the degraded payload.
+    monkeypatch.chdir(store.root)
+    monkeypatch.setenv("VOUCH_CLAUDE_PROJECTS_DIR", str(store.kb_dir / "no-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(store.kb_dir / "no-codex"))
+
+    resp = handle_request({
+        "id": "3", "method": "kb.session_transcript",
+        "params": {"session_id": "11111111-1111-1111-1111-111111111111"},
+    })
+    assert resp["ok"] is True, resp
+    assert resp["result"]["available"] is False
+
+
+def test_handler_degrades_when_no_kb_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sibling test above covers "KB present, raw transcript missing". This
+    # one covers "no KB at all", which the handler used to answer with an
+    # internal error rather than the degraded envelope.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VOUCH_KB_PATH", raising=False)
+    monkeypatch.delenv("VOUCH_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("VOUCH_CLAUDE_PROJECTS_DIR", str(tmp_path / "no-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
     from vouch.jsonl_server import handle_request
 
     resp = handle_request({
@@ -205,6 +234,31 @@ def test_handler_returns_degraded_when_absent() -> None:
     })
     assert resp["ok"] is True
     assert resp["result"]["available"] is False
+    assert resp["result"]["observations"] == []
+
+
+def test_load_transcript_without_store_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VOUCH_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    out = transcript.load_transcript(None, "11111111-1111-1111-1111-111111111111")
+    assert out["available"] is False
+    assert out["observations"] == []
+
+
+def test_mcp_session_transcript_degrades_without_kb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VOUCH_KB_PATH", raising=False)
+    monkeypatch.delenv("VOUCH_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("VOUCH_CLAUDE_PROJECTS_DIR", str(tmp_path / "no-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
+    from vouch.server import kb_session_transcript
+
+    out = kb_session_transcript("11111111-1111-1111-1111-111111111111")
+    assert out["available"] is False
+    assert out["observations"] == []
 
 
 # --- Task 9: Codex parser -------------------------------------------------
@@ -213,6 +267,8 @@ _CODEX_LINES = [
     {"type": "session_meta", "payload": {
         "id": "cx-1", "cwd": "/repo", "timestamp": "2026-06-22T08:01:54Z",
         "git": {"branch": "feat/x"}}},
+    {"type": "turn_context", "payload": {
+        "turn_id": "t1", "cwd": "/repo", "model": "gpt-5-codex"}},
     {"type": "response_item", "payload": {
         "type": "message", "role": "developer",
         "content": [{"type": "input_text", "text": "<permissions>boilerplate"}]}},
@@ -245,6 +301,8 @@ def test_parse_codex_pairs_calls_and_skips_boilerplate(tmp_path: Path) -> None:
     assert out["session"]["agent"] == "codex"
     assert out["session"]["cwd"] == "/repo"
     assert out["session"]["git_branch"] == "feat/x"
+    # codex carries the model on turn_context, not session_meta
+    assert out["session"]["model"] == "gpt-5-codex"
 
     roles = [m["role"] for m in out["messages"]]
     assert roles == ["user", "assistant"]  # developer message skipped

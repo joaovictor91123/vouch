@@ -70,6 +70,19 @@ def _store() -> KBStore:
         ) from e
 
 
+def _store_or_none() -> KBStore | None:
+    """The KB when one resolves, else None.
+
+    Only for reads whose data source is outside `.vouch/` — the KB is an
+    enrichment, not the subject. Every method that reads or writes knowledge
+    must keep using `_store()` so a missing KB stays a hard error.
+    """
+    try:
+        return _store()
+    except RuntimeError:
+        return None
+
+
 def _agent() -> str:
     # An authenticated bearer subject (set by the /mcp transport) is the
     # principal's real identity and must be what proposals/audit attribute to,
@@ -382,6 +395,34 @@ def kb_read_relation(relation_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def kb_read_evidence(evidence_id: str) -> dict[str, Any]:
+    """Return an evidence record — the span/quote a claim cites."""
+    store = _store()
+    try:
+        ev = store.get_evidence(evidence_id)
+    except ArtifactNotFoundError as e:
+        raise ValueError(str(e)) from e
+    result = ev.model_dump(mode="json")
+    return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
+        result, store, query=ev.quote,
+    )
+
+
+@mcp.tool()
+def kb_read_source(source_id: str) -> dict[str, Any]:
+    """Return a registered source's metadata (not its content)."""
+    store = _store()
+    try:
+        src = store.get_source(source_id)
+    except ArtifactNotFoundError as e:
+        raise ValueError(str(e)) from e
+    result = src.model_dump(mode="json")
+    return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
+        result, store, query=src.title,
+    )
+
+
+@mcp.tool()
 def kb_diff(old_id: str, new_id: str | None = None) -> dict[str, Any]:
     """Field-level diff between two claim revisions or two page revisions.
 
@@ -657,12 +698,13 @@ def kb_session_transcript(session_id: str, agent: str | None = None) -> dict[str
     Read-only. Locates the raw Claude Code / Codex file on disk and normalizes
     it into message blocks (text, thinking, tool_use with paired results).
     ``agent`` restricts the search ("claude" | "codex"); omit to try both.
-    Degrades to compact capture observations when the raw file is unavailable.
+    Degrades to compact capture observations when the raw file is unavailable,
+    and to a bare unavailable result when no KB resolves at all.
     """
     from . import transcript
     if agent is not None and agent not in ("claude", "codex"):
         raise ValueError(f"unknown agent: {agent!r} (expected 'claude' or 'codex')")
-    return transcript.load_transcript(_store(), session_id, agent=agent)
+    return transcript.load_transcript(_store_or_none(), session_id, agent=agent)
 
 
 @mcp.tool()
@@ -756,11 +798,21 @@ def _proposal_response(result, dry_run: bool) -> dict[str, Any]:
 
 
 @mcp.tool()
-def kb_approve(proposal_id: str, reason: str | None = None) -> dict[str, Any]:
-    """Approve a proposal → durable artifact. Use carefully."""
+def kb_approve(
+    proposal_id: str,
+    reason: str | None = None,
+    drop_missing_claims: bool = False,
+) -> dict[str, Any]:
+    """Approve a proposal → durable artifact. Use carefully.
+
+    A page proposal citing claims that no longer exist is refused; pass
+    drop_missing_claims=True to strip the dead references and approve what
+    remains (the dropped ids are recorded in the audit event).
+    """
     try:
         artifact = approve(_store(), proposal_id, approved_by=_agent(),
-                           reason=reason)
+                           reason=reason,
+                           drop_missing_claims=drop_missing_claims)
     except (ArtifactNotFoundError, ValueError, ProposalError) as e:
         raise ValueError(str(e)) from e
     return {"kind": type(artifact).__name__.lower(), "id": artifact.id}
@@ -876,6 +928,30 @@ def kb_clear_claims(
         "count": len(to_clear),
         "claim_ids": [c.id for c in to_clear],
         "dry_run": dry_run,
+    }
+
+
+@mcp.tool()
+def kb_wipe_dead_refs(dry_run: bool = False) -> dict[str, Any]:
+    """Strip references to claims that no longer exist, KB-wide.
+
+    Covers durable pages and pending page proposals: the frontmatter claim
+    list and inline `[claim: …]` markers both lose ids that resolve to no
+    claim file. Audited as one bulk event. Use after claims were archived,
+    redacted, or bulk-cleared and pages still point at them.
+
+    Args:
+        dry_run: If True, report what would be stripped without writing.
+
+    Returns:
+        Per-page and per-proposal dead ids, total dropped count.
+    """
+    r = life.wipe_dead_claim_refs(_store(), actor=_agent(), dry_run=dry_run)
+    return {
+        "pages": r.pages,
+        "proposals": r.proposals,
+        "dropped": r.dropped,
+        "dry_run": r.dry_run,
     }
 
 
