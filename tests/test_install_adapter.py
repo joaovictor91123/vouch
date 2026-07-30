@@ -166,9 +166,8 @@ def test_settings_json_merges_into_existing(tmp_path: Path) -> None:
     # vouch content merged in
     assert "mcp__vouch__kb_status" in merged["permissions"]["allow"]
     assert any("capture banner" in c for c in start_cmds)
-    post = [h["command"] for g in merged["hooks"].get("PostToolUse", []) for h in g["hooks"]]
     end = [h["command"] for g in merged["hooks"].get("SessionEnd", []) for h in g["hooks"]]
-    assert any("capture observe" in c for c in post)
+    assert "PostToolUse" not in merged["hooks"]
     assert any("capture finalize" in c for c in end)
 
     assert ".claude/settings.json" in result.merged
@@ -189,13 +188,14 @@ def test_settings_json_merge_is_idempotent(tmp_path: Path) -> None:
     assert ".claude/settings.json" not in second.merged
 
     data = json.loads(after)
-    observe_cmds = [
+    assert "PostToolUse" not in data.get("hooks", {})
+    end_cmds = [
         h["command"]
-        for g in data["hooks"]["PostToolUse"]
+        for g in data["hooks"].get("SessionEnd", [])
         for h in g["hooks"]
-        if "capture observe" in h["command"]
+        if "capture finalize" in h["command"]
     ]
-    assert len(observe_cmds) == 1  # not duplicated
+    assert len(end_cmds) == 1  # not duplicated
 
 
 def test_settings_json_written_fresh_when_absent(tmp_path: Path) -> None:

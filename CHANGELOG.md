@@ -226,6 +226,13 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
+- **capture.realtime defaults off** (#602):
+  per-tool `PostToolUse` observe is opt-in. when off (the new default),
+  `capture observe` no-ops with `{"skipped": "realtime-disabled"}` and
+  SessionEnd rebuilds tool activity from the Claude transcript so
+  `min_observations` still works. shipped claude-code hooks drop
+  PostToolUse/Stop; re-install does not prune old hooks from existing
+  `settings.json`. set `capture.realtime: true` to restore the buffer.
 - **core PRs can auto-merge, on two mechanical bars.** the blanket "core
   is never armed" refusal is gone; both authorization surfaces (the
   `auto-merge` label and the `/auto-merge` comment) now route through one
