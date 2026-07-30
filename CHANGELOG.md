@@ -29,6 +29,11 @@ All notable changes to vouch are documented here. Format follows
   point at — every open pr into `test` is stuck this way today. the list is now
   the four ci contexts that actually run; re-running the script against the
   live ruleset clears the stale contexts.
+- **hooks quoted `"false"` disables short_circuit / prompt_gate** (#631):
+  `#620` / `#558` fixed most loaders, but `short_circuit_cfg` and
+  `prompt_gate_cfg` still used bare `bool()`, so a quoted
+  `enabled: "false"` silently turned those features *on*. both now
+  use `coerce_bool`.
 - **digest drops archived followup pages** (#625):
   `followups_due` already skipped `done`/`dropped` metadata, but an
   `ARCHIVED` page with `followup_status=open` and a past `due_at` still
