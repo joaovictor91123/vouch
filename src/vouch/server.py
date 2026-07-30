@@ -71,15 +71,20 @@ def _store() -> KBStore:
 
 
 def _store_or_none() -> KBStore | None:
-    """The KB when one resolves, else None.
+    """the kb when one resolves, else None.
 
-    Only for reads whose data source is outside `.vouch/` — the KB is an
-    enrichment, not the subject. Every method that reads or writes knowledge
-    must keep using `_store()` so a missing KB stays a hard error.
+    only for reads whose data source is outside `.vouch/` — the kb is an
+    enrichment, not the subject. every method that reads or writes knowledge
+    must keep using `_store()` so a missing kb stays a hard error.
+
+    catches `KBNotFoundError` directly rather than the `RuntimeError` that
+    `_store()` re-raises it as: that wrapper is indistinguishable from a
+    malformed-config or permission failure, and reporting one of those as
+    "no kb" would silently drop enrichment instead of surfacing a real fault.
     """
     try:
-        return _store()
-    except RuntimeError:
+        return KBStore(discover_root())
+    except KBNotFoundError:
         return None
 
 
@@ -1152,7 +1157,9 @@ def kb_audit(
         project=project,
         agent=agent,
     )
-    events = list(audit.read_events(store.kb_dir, store=store, viewer=viewer))[-tail:]
+    events = audit.tail_events(
+        list(audit.read_events(store.kb_dir, store=store, viewer=viewer)), tail
+    )
     return {
         "viewer": {"project": viewer.project, "agent": viewer.agent},
         "events": [e.model_dump(mode="json") for e in events],
