@@ -20,6 +20,16 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
+  flattened `resp.headers` (case-insensitive by design) into a plain
+  `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
+  `None` whenever a hub or intermediary sent the header as `etag` rather
+  than the exact literal `ETag`. That cleared `link.last_bundle_id`,
+  permanently defeating `If-None-Match` dedup — every subsequent
+  `vouch hub pull` re-downloaded the whole bundle and re-filed every
+  claim as a fresh pending proposal, indefinitely. Header keys are now
+  lower-cased on the way into the dict, and the one consuming lookup
+  matches.
 - **`kb.explain_ranking` no longer leaks status-filtered candidate text**
   (#650): a retracted/superseded/redacted claim or archived page correctly
   reported `gate: "status-filtered"`, but its `summary` was still sourced
