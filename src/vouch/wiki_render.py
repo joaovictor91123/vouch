@@ -21,15 +21,25 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 def _link_index(pages: list[Page]) -> dict[str, Page]:
     """Map every resolvable name (title, id/slug, alias) to its page.
 
-    Keys are lowercased. Earlier pages win a name collision (``setdefault``),
-    so a later page's alias never shadows an existing page's title.
+    Keys are lowercased. Titles and slugs are indexed before any alias, so a
+    page's real name always beats another page's nickname for it — inserting
+    both in one pass per page made that depend on list order, letting an
+    earlier page's alias shadow a later page's actual title. Within each pass
+    earlier pages still win (``setdefault``).
     """
     index: dict[str, Page] = {}
+
+    def add(name: object, page: Page) -> None:
+        key = str(name).strip().lower()
+        if key:
+            index.setdefault(key, page)
+
     for page in pages:
-        for name in (page.title, page.id, *(page.metadata.get("aliases") or [])):
-            key = str(name).strip().lower()
-            if key:
-                index.setdefault(key, page)
+        add(page.title, page)
+        add(page.id, page)
+    for page in pages:
+        for alias in page.metadata.get("aliases") or []:
+            add(alias, page)
     return index
 
 
