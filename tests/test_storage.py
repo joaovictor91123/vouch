@@ -981,3 +981,54 @@ def test_list_pages_skips_unreadable_file(store: KBStore) -> None:
 
     pages = store.list_pages()
     assert [p.id for p in pages] == ["p-ok"]
+
+
+# --- path-traversal: untrusted slug_hint / artifact id must not escape KB --
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../evil", "..", "sub/evil", "a\\b", "/abs", ".", "x\x00y", ""],
+)
+def test_put_rejects_path_traversal_ids(store: KBStore, bad_id: str) -> None:
+    # Write builders must refuse ids that escape their subdirectory; an
+    # unsanitized id is a path-traversal write primitive.
+    src = store.put_source(b"e")
+    with pytest.raises(ValueError, match="artifact id"):
+        store.put_claim(Claim(id=bad_id, text="t", evidence=[src.id]))
+    with pytest.raises(ValueError, match="artifact id"):
+        store.put_page(Page(id=bad_id, title="T", body="b"))
+    with pytest.raises(ValueError, match="artifact id"):
+        store.put_entity(Entity(id=bad_id, name="N", type=EntityType.CONCEPT))
+    with pytest.raises(ValueError, match="artifact id"):
+        store.get_source(bad_id)
+
+
+def test_validate_artifact_id_rejects_non_string() -> None:
+    from vouch.storage import _validate_artifact_id
+
+    with pytest.raises(ValueError, match="artifact id must be a non-empty string"):
+        _validate_artifact_id(None)  # type: ignore[arg-type]
+
+
+def test_approve_with_traversal_slug_hint_writes_nothing(
+    store: KBStore, tmp_path: Path
+) -> None:
+    # End-to-end: an untrusted proposer supplies a malicious slug_hint; the
+    # proposal may file, but approval must not write an artifact outside the KB.
+    src = store.put_source(b"e")
+    slug_hint = "../../../../evil"
+    pr = propose_claim(
+        store,
+        text="t",
+        evidence=[src.id],
+        proposed_by="agent",
+        slug_hint=slug_hint,
+    )
+    # Exact target the unguarded join would have written.
+    escaped = (store.kb_dir / "claims" / f"{slug_hint}.yaml").resolve()
+    with pytest.raises((ProposalError, ValueError)):
+        approve(store, pr.id, approved_by="reviewer")
+    assert not escaped.exists()
+    assert not escaped.with_suffix("").exists()
+    assert list((store.kb_dir / "claims").glob("*.yaml")) == []
