@@ -172,6 +172,49 @@ def test_context_pack_excludes_archived_claims(store: KBStore) -> None:
     assert not any(it["id"] == "c1" for it in pack["items"]), pack
 
 
+def test_context_pack_excludes_archived_pages(store: KBStore) -> None:
+    """The mirror of #581 on the recall side: kb.search learned to drop
+    archived pages, build_context_pack never did — so archiving a page hid
+    it from search while it kept being injected into every context pack."""
+    from vouch.models import Page, PageStatus, PageType
+
+    src = store.put_source(b"e")
+    store.put_page(Page(
+        id="p-live", title="mongodb ops", body="live page about mongodb",
+        type=PageType.CONCEPT, sources=[src.id],
+    ))
+    store.put_page(Page(
+        id="p-arch", title="mongodb old", body="archived mongodb notes",
+        type=PageType.CONCEPT, status=PageStatus.ARCHIVED, sources=[src.id],
+    ))
+    health.rebuild_index(store)
+
+    pack = context.build_context_pack(store, query="mongodb", limit=10)
+    ids = {item["id"] for item in pack["items"]}
+
+    assert "p-live" in ids, pack
+    assert "p-arch" not in ids, pack
+
+
+def test_page_is_live_rejects_archived_and_missing(store: KBStore) -> None:
+    """The shared predicate behind both context builders and kb.search.
+
+    The graph-expansion path carried the same gap as the main loop and now
+    routes through this, so pinning its contract pins both call sites.
+    """
+    from vouch.models import Page, PageStatus, PageType
+
+    src = store.put_source(b"e")
+    store.put_page(Page(
+        id="p-arch", title="mongodb old", body="archived mongodb notes",
+        type=PageType.CONCEPT, status=PageStatus.ARCHIVED, sources=[src.id],
+    ))
+    health.rebuild_index(store)
+
+    assert context._page_is_live(store, "p-arch") is False
+    assert context._page_is_live(store, "p-missing") is False
+
+
 def test_search_kb_excludes_retracted_claims(store: KBStore) -> None:
     """Regression for #581: search_kb must apply the same retracted-status
     filter as build_context_pack — otherwise kb.search leaks archived /
