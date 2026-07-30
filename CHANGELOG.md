@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
 - **triage ignores archived twins for duplication** (#638):
   claim/page pools used every approved artifact, so an archived claim
   (or archived page title) with the same text forced `duplication_risk=1.0`
