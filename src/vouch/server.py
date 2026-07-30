@@ -1217,12 +1217,13 @@ def kb_effectiveness(
 
     window: duration ("90d"), ISO date, or "all". Bounds the sessions scored.
     """
-    from .eval.effectiveness import compute
+    from .eval.effectiveness import DEFAULT_WINDOW, compute
 
-    # One shared implementation across MCP / JSONL / CLI.
+    # One shared implementation across MCP / JSONL / CLI. An empty/None window
+    # falls back to the default rather than reaching parse_since as "None".
     return compute(
         _store(),
-        since=metrics_mod.parse_since(window),
+        since=metrics_mod.parse_since(window or DEFAULT_WINDOW),
         min_samples=min_samples,
     )
 

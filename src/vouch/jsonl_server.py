@@ -799,10 +799,15 @@ def _h_effectiveness(p: dict) -> dict:
 
     # One shared implementation across MCP / JSONL / CLI. Read-only: it reads
     # the audit log and the retrieval-event log and reports.
+    # `or` rather than a .get default: an explicit {"window": null} on the wire
+    # puts None in the dict, and str(None) is the literal "None", which
+    # parse_since rejects with a user-facing error instead of defaulting.
+    window = p.get("window") or DEFAULT_WINDOW
+    min_samples = p.get("min_samples")
     return compute(
         _store(),
-        since=metrics_mod.parse_since(str(p.get("window", DEFAULT_WINDOW))),
-        min_samples=int(p.get("min_samples", DEFAULT_MIN_SAMPLES)),
+        since=metrics_mod.parse_since(str(window)),
+        min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else int(min_samples),
     )
 
 

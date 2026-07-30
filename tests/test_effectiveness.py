@@ -79,9 +79,30 @@ def test_wilson_interval_of_no_samples_is_maximally_uncertain() -> None:
 # --- event classification -------------------------------------------------
 
 
-@pytest.mark.parametrize("event", ["claim.confirm", "proposal.claim.approve"])
+@pytest.mark.parametrize(
+    "event",
+    [
+        "claim.confirm",
+        "proposal.claim.approve",
+        "proposal.page.approve",
+        "proposal.entity.approve",
+        "proposal.relation.approve",
+    ],
+)
 def test_good_events_classify_good(event: str) -> None:
     assert eff.classify_event(event) == "good"
+
+
+@pytest.mark.parametrize("kind", ["claim", "page", "entity", "relation", "theme"])
+def test_approve_and_reject_are_matched_symmetrically(kind: str) -> None:
+    """Every proposal kind must classify on both sides.
+
+    Listing only `proposal.claim.approve` as good while `proposal.*.reject`
+    matched every kind dropped page/entity approvals entirely — undercounting
+    scored sessions and dragging the baseline down.
+    """
+    assert eff.classify_event(f"proposal.{kind}.approve") == "good"
+    assert eff.classify_event(f"proposal.{kind}.reject") == "bad"
 
 
 @pytest.mark.parametrize(
@@ -125,6 +146,26 @@ def test_open_session_is_not_scored(store: KBStore) -> None:
     sessions.session_start(store, agent="agent", task="still running")
     lifecycle.confirm(store, claim_id=claim, actor="reviewer")
     assert eff.compute(store)["sessions_scored"] == 0
+
+
+def test_page_approval_ends_a_session_well(store: KBStore) -> None:
+    """A non-claim approval is a good outcome, not an unscored session."""
+    claim = _claim(store, "auth uses jwt tokens")
+    sess = sessions.session_start(store, agent="agent", task="page work")
+    retrieval_events.log_event(
+        store, query="jwt", backend="fts5", limit=5, budget_chars=2000,
+        items=[{"type": "claim", "id": claim, "score": 1.0}],
+    )
+    pr = proposals.propose_page(
+        store, title="design notes", body="the design", proposed_by="agent"
+    )
+    proposals.approve(store, pr.id, approved_by="reviewer")
+    ended = sessions.session_end(store, sess.id)
+
+    assert eff.session_outcome(store, ended) == "good"
+    result = eff.compute(store)
+    assert result["sessions_scored"] == 1
+    assert result["baseline"] == 1.0
 
 
 # --- the insufficient-sample path ----------------------------------------
@@ -349,3 +390,103 @@ def test_malformed_retrieval_events_are_skipped_not_fatal() -> None:
                    {"type": "claim", "id": "kept"}]},
     ]
     assert eff._surfaced_in(events, start, end) == {("claim", "kept")}
+
+
+# --- copilot review findings on #656 --------------------------------------
+
+
+def test_item_without_a_kind_is_skipped() -> None:
+    """An id with no type renders as "/<id>" — not a usable pointer."""
+    from datetime import UTC, datetime
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 2, tzinfo=UTC)
+    events = [{
+        "ts": "2026-01-01T12:00:00+00:00",
+        "items": [
+            {"type": "", "id": "no-kind"},
+            {"id": "kind-missing-entirely"},
+            {"type": "claim", "id": "kept"},
+        ],
+    }]
+    assert eff._surfaced_in(events, start, end) == {("claim", "kept")}
+
+
+def test_jsonl_null_window_falls_back_to_the_default(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`{"window": null}` on the wire must not reach parse_since as "None"."""
+    from vouch import jsonl_server
+
+    claim = _claim(store, "auth uses jwt tokens")
+    _session(store, surfaced=claim, outcome="good", task="g0")
+    monkeypatch.setattr(jsonl_server, "_store", lambda: store)
+
+    result = jsonl_server.HANDLERS["kb.effectiveness"]({"window": None})
+    assert result["sessions_scored"] == 1
+    assert result["min_samples"] == eff.DEFAULT_MIN_SAMPLES
+
+
+def test_jsonl_null_min_samples_falls_back_to_the_default(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch import jsonl_server
+
+    monkeypatch.setattr(jsonl_server, "_store", lambda: store)
+    result = jsonl_server.HANDLERS["kb.effectiveness"]({"min_samples": None})
+    assert result["min_samples"] == eff.DEFAULT_MIN_SAMPLES
+
+
+def test_mcp_empty_window_falls_back_to_the_default(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch import server
+
+    monkeypatch.setattr(server, "_store", lambda: store)
+    assert server.kb_effectiveness(window="")["sessions_scored"] == 0
+
+
+def test_verdict_timeline_is_read_once_and_reused(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """compute() must not rescan the audit log per session.
+
+    The whole-log scan inside session_outcome made this O(sessions x events);
+    this pins the fix so a later refactor cannot quietly reintroduce it.
+    """
+    claim = _claim(store, "auth uses jwt tokens")
+    for i in range(4):
+        _session(store, surfaced=claim, outcome="good", task=f"g{i}")
+
+    from vouch import audit as audit_mod
+
+    calls = {"n": 0}
+    real = audit_mod.read_events
+
+    def counting(*args: object, **kwargs: object):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(audit_mod, "read_events", counting)
+    result = eff.compute(store)
+
+    assert result["sessions_scored"] == 4
+    assert calls["n"] == 1, f"audit log read {calls['n']} times for 4 sessions"
+
+
+def test_timeline_and_on_demand_read_agree(store: KBStore) -> None:
+    """session_outcome is identical whether or not a timeline is passed."""
+    claim = _claim(store, "auth uses jwt tokens")
+    _session(store, surfaced=claim, outcome="bad", task="b0")
+    ended = store.list_sessions()[0]
+
+    timeline = eff.verdict_timeline(store)
+    assert eff.session_outcome(store, ended) == eff.session_outcome(
+        store, ended, timeline=timeline
+    )
+    # the fixture's own approve is a good verdict outside the session window;
+    # the archive inside it is what decides the session
+    assert [v for _ts, v in timeline] == ["good", "bad"]
+    assert eff.session_outcome(store, ended) == "bad"
+    # timeline is sorted, which is what makes the bisect valid
+    assert [ts for ts, _v in timeline] == sorted(ts for ts, _v in timeline)

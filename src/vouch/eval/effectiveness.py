@@ -38,6 +38,7 @@ baseline and the sample meets ``min_samples``, and everything else reports
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -54,19 +55,26 @@ DEFAULT_WINDOW = "90d"
 Z_95 = 1.959963984540054
 
 # Audit verbs that end a session well: the reviewer kept what they saw.
-GOOD_EVENTS = frozenset({"claim.confirm", "proposal.claim.approve"})
+GOOD_EVENTS = frozenset({"claim.confirm"})
 
 # Verbs that end it badly: something surfaced turned out to be wrong, stale,
-# or unwanted. `proposal.*.reject` is matched by prefix because the kind sits
-# in the middle of the verb (`proposal.claim.reject`, `proposal.page.reject`).
+# or unwanted.
 BAD_EVENTS = frozenset({
     "claim.contradict",
     "claim.supersede",
     "claim.archive",
     "claim.redact",
 })
-_BAD_PREFIX = "proposal."
-_BAD_SUFFIX = ".reject"
+
+# Proposal decisions carry the kind in the middle of the verb
+# (`proposal.claim.approve`, `proposal.page.reject`, `proposal.entity.*`), so
+# they are matched by prefix + suffix. Both sides must be matched the same way:
+# listing only `proposal.claim.approve` as good while every kind's reject
+# counted as bad dropped page/entity/relation approvals, which both undercounts
+# scored sessions and skews the baseline downward.
+_PROPOSAL_PREFIX = "proposal."
+_APPROVE_SUFFIX = ".approve"
+_REJECT_SUFFIX = ".reject"
 
 VERDICT_USEFUL = "useful"
 VERDICT_HARMFUL = "harmful"
@@ -130,31 +138,62 @@ def classify_event(event: str) -> str | None:
         return "good"
     if event in BAD_EVENTS:
         return "bad"
-    if event.startswith(_BAD_PREFIX) and event.endswith(_BAD_SUFFIX):
-        return "bad"
+    if event.startswith(_PROPOSAL_PREFIX):
+        if event.endswith(_APPROVE_SUFFIX):
+            return "good"
+        if event.endswith(_REJECT_SUFFIX):
+            return "bad"
     return None
 
 
-def session_outcome(store: KBStore, session: Session) -> str | None:
+def verdict_timeline(store: KBStore) -> list[tuple[datetime, str]]:
+    """Every verdict-bearing audit event as ``(when, "good"|"bad")``, in order.
+
+    Read once and reused for every session. Scanning the whole audit log inside
+    ``session_outcome`` made ``compute`` O(sessions x audit_events), which is
+    the wrong shape for the exact KBs this is meant to be useful on.
+    """
+    timeline: list[tuple[datetime, str]] = []
+    for event in audit_mod.read_events(store.kb_dir):
+        verdict = classify_event(event.event)
+        if verdict is not None:
+            timeline.append((_as_utc(event.created_at), verdict))
+    timeline.sort(key=lambda row: row[0])
+    return timeline
+
+
+def session_outcome(
+    store: KBStore,
+    session: Session,
+    *,
+    timeline: list[tuple[datetime, str]] | None = None,
+) -> str | None:
     """Classify one session from the audit events inside its window.
 
     ``None`` when the window holds no verdict-bearing event, or holds both —
     a session that confirmed one claim and rejected another says nothing
     clean about any single artifact in it, so it is dropped rather than
     guessed at.
+
+    ``timeline`` is the pre-read output of :func:`verdict_timeline`; it is read
+    on demand when omitted so a single-session caller stays a one-liner.
     """
     end = session.ended_at
     if end is None:
         return None
+    rows = verdict_timeline(store) if timeline is None else timeline
+    start_ts = _as_utc(session.started_at)
+    end_ts = _as_utc(end)
     good = bad = 0
-    for event in audit_mod.read_events(store.kb_dir):
-        created = _as_utc(event.created_at)
-        if created < _as_utc(session.started_at) or created > _as_utc(end):
-            continue
-        verdict = classify_event(event.event)
+    # bisect the sorted timeline instead of rescanning it: only the slice
+    # inside the session window can contribute a verdict.
+    lo = bisect_left(rows, start_ts, key=lambda row: row[0])
+    for when, verdict in rows[lo:]:
+        if when > end_ts:
+            break
         if verdict == "good":
             good += 1
-        elif verdict == "bad":
+        else:
             bad += 1
     if good and bad:
         return None
@@ -188,9 +227,12 @@ def _surfaced_in(
         for item in event.get("items", []):
             if not isinstance(item, dict):
                 continue
+            kind = str(item.get("type", ""))
             artifact_id = str(item.get("id", ""))
-            if artifact_id:
-                out.add((str(item.get("type", "")), artifact_id))
+            # both halves must be present: an item with an id but no type
+            # renders as "/<id>" in the report, which is not a usable pointer.
+            if kind and artifact_id:
+                out.add((kind, artifact_id))
     return out
 
 
@@ -221,6 +263,7 @@ def compute(
     dead weight, not the winners.
     """
     events = retrieval_events.read_events(store)
+    timeline = verdict_timeline(store)
     good_by_artifact: dict[tuple[str, str], int] = {}
     bad_by_artifact: dict[tuple[str, str], int] = {}
     sessions_scored = 0
@@ -233,7 +276,7 @@ def compute(
         end = _as_utc(session.ended_at)
         if since is not None and end < _as_utc(since):
             continue
-        outcome = session_outcome(store, session)
+        outcome = session_outcome(store, session, timeline=timeline)
         if outcome is None:
             continue
         sessions_scored += 1
