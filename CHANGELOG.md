@@ -31,6 +31,10 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
+  `_list_decided` parsed every decided proposal strictly, so a single bad file
+  aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
+  same resilience as `list_proposals` / `list_pages`.
 - **security: empty-quote receipts no longer clear the auto-approve gate**
   (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
   guarded only on `quote is None`, not an empty string. An `Evidence` with
