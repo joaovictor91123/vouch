@@ -7,6 +7,20 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **explicit pins — a working set that always enters the pack** (#615):
+  `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
+  pages lead every context pack instead of having to win the query each turn,
+  which is what `hot_memory` and `salience` cannot do — they are recency-driven
+  and decay exactly when a long task needs them not to. Capped at
+  `retrieval.pins.budget_share` (default 0.3) so pins can never starve
+  retrieval, and de-duplicated against what retrieval already found. Pins are
+  **not a gate bypass and not a permission**: they point at already-approved
+  artifacts, and lifecycle and viewer scope are re-checked on every build, so a
+  pinned claim that is later superseded/archived/redacted — or one the scope
+  filter hides — stops being injected. Shared pins live in committed
+  `.vouch/pins.yaml`; `--local` keeps a personal set in gitignored
+  `.vouch/pins.local.yaml`. `--expires` drops a pin automatically, applied on
+  read so building a pack never writes.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every

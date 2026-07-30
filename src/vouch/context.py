@@ -20,6 +20,7 @@ from typing import Any, Literal, cast
 import yaml
 
 from . import graph, hot_memory, index_db, retrieval_events
+from . import pins as pins_mod
 from . import strategy as strategy_mod
 from .config_coerce import coerce_bool
 from .embeddings.fusion import rrf_fuse
@@ -829,6 +830,17 @@ def build_context_pack(
         )
 
     items = _dedupe_near_duplicates(items)
+
+    # Pins go in front of everything retrieval chose (#615): the working set is
+    # a standing instruction, so it must not have to win the query every turn.
+    # `pinned_items` re-checks lifecycle and viewer scope on every build, so a
+    # pin can reorder the pack but never widen what it may contain. The budget
+    # share caps them, and de-duplication keeps a pinned artifact that also
+    # ranked from occupying two slots.
+    pinned = pins_mod.pinned_items(store, viewer=viewer, max_chars=max_chars)
+    if pinned:
+        pinned_keys = {(p.type, p.id) for p in pinned}
+        items = pinned + [i for i in items if (i.type, i.id) not in pinned_keys]
 
     failed: list[str] = []
     uncited: list[str] = []
