@@ -45,6 +45,16 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **security: koth strategy sandbox now blocks filesystem mutation, not
+  just `open`-writes** (#660): `_install_audit_hook` blocked `open()` in a
+  write mode, but never the separate CPython audit events `os.remove`,
+  `os.rename` (and `os.replace`), `os.mkdir`, `os.rmdir`, `os.link`,
+  `os.symlink`, `os.chmod`, `os.truncate` — so untrusted competition
+  strategy code could delete, rename, or create files/directories despite
+  the sandbox's documented claim to block "filesystem writes." Confirmed
+  end-to-end: a strategy's `rank()` could silently delete an arbitrary
+  file via `os.remove` with no error, timeout, or blocked-call signal.
+  All eight events now hit the same blocklist as `open`-writes.
 - **`kb.detect_themes` no longer leaks claim and session ids the viewer
   cannot retrieve** (#657): the detector filtered claims on status and
   `approved_by` but never on `ArtifactScope`, so a private or cross-project
