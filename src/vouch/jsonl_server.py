@@ -171,6 +171,23 @@ def _h_search(p: dict) -> dict:
     )
 
 
+def _h_explain_ranking(p: dict) -> dict:
+    from .explain_ranking import explain_ranking
+
+    # One shared implementation across MCP / JSONL / CLI — see
+    # explain_ranking.explain_ranking. Read-only: no write path is touched.
+    max_chars = p.get("max_chars")
+    return explain_ranking(
+        _store(),
+        query=p["query"],
+        limit=int(p.get("limit", 10)),
+        max_chars=None if max_chars is None else int(max_chars),
+        require_citations=bool(p.get("require_citations", False)),
+        project=p.get("project"),
+        agent=p.get("agent"),
+    )
+
+
 def _load_cfg(store: KBStore) -> dict:
     try:
         loaded = yaml.safe_load((store.kb_dir / "config.yaml").read_text(encoding="utf-8"))
@@ -894,6 +911,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.activity": _h_activity,
     "kb.digest": _h_digest,
     "kb.search": _h_search,
+    "kb.explain_ranking": _h_explain_ranking,
     "kb.neighbors": _h_neighbors,
     "kb.experts": _h_experts,
     "kb.context": _h_context,
