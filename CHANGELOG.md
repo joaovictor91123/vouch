@@ -20,6 +20,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
 - **`mask_secrets` now catches underscore-adjacent credential key names**
   (#646): the `\b` word boundaries around the keyword alternation treat `_`
   as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
