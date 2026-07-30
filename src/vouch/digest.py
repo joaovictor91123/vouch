@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .metrics import DEFAULT_STALE_DAYS, compute
-from .models import ClaimStatus, ProposalStatus
+from .models import ClaimStatus, PageStatus, ProposalStatus
 from .page_filters import filter_pages
 from .storage import KBStore
 
@@ -179,11 +179,17 @@ def build(
     stale.sort(key=lambda pair: pair[0])
     stale_rows = [row for _, row in stale[:limit]]
 
+    # archived pages are excluded for the same reason the stale loop above
+    # skips retired claims: a followup that has been archived is no longer
+    # something the reviewer is being asked to act on, and leaving it in the
+    # due list makes archiving decorative on the surface it matters most.
     due_pages = filter_pages(
-        store.list_pages(),
+        [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED],
         kind="followup",
         before={"due_at": now.date().isoformat()},
     )
+    # mirror recall/search: archived pages are out of the live set even when
+    # metadata still says followup_status=open and due_at is past.
     followup_rows = sorted(
         (
             FollowupRow(
@@ -194,7 +200,9 @@ def build(
                 followup_status=str(p.metadata.get("followup_status", "")),
             )
             for p in due_pages
-            if str(p.metadata.get("followup_status", "")) not in _CLOSED_FOLLOWUP_STATUSES
+            if p.status is not PageStatus.ARCHIVED
+            and str(p.metadata.get("followup_status", ""))
+            not in _CLOSED_FOLLOWUP_STATUSES
         ),
         key=lambda r: r.due_at,
     )[:limit]

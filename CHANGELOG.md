@@ -25,6 +25,25 @@ All notable changes to vouch are documented here. Format follows
   (or archived page title) with the same text forced `duplication_risk=1.0`
   and an advisory reject on re-file. pools and embedding hits now skip
   retracted claims and archived pages, matching search/recall/digest.
+- **`setup_repo_guards.sh` no longer requires checks that cannot report**:
+  `#630` removed the `trust-gate` workflow and the coderabbit gate removed
+  `coderabbit-approved`, but both contexts stayed in the script's
+  `required_status_checks`, so the provisioning source still declared two
+  checks with no workflow behind them. a required context that never reports
+  leaves the pr pending rather than failing, so it blocks with no red x to
+  point at — every open pr into `test` is stuck this way today. the list is now
+  the four ci contexts that actually run; re-running the script against the
+  live ruleset clears the stale contexts.
+- **hooks quoted `"false"` disables short_circuit / prompt_gate** (#631):
+  `#620` / `#558` fixed most loaders, but `short_circuit_cfg` and
+  `prompt_gate_cfg` still used bare `bool()`, so a quoted
+  `enabled: "false"` silently turned those features *on*. both now
+  use `coerce_bool`.
+- **digest drops archived followup pages** (#625):
+  `followups_due` already skipped `done`/`dropped` metadata, but an
+  `ARCHIVED` page with `followup_status=open` and a past `due_at` still
+  appeared every morning — stale claims were filtered, pages were not.
+  mirror recall: archived followups leave the due list.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
