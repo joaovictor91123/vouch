@@ -42,6 +42,7 @@ from . import lifecycle as life
 from . import metrics as metrics_mod
 from . import migrations as migrations_mod
 from . import notify as notify_mod
+from . import pins as pins_mod
 from . import pr_cache as prc_mod
 from . import provenance as prov_mod
 from . import recall as recall_mod
@@ -115,6 +116,7 @@ def _cli_errors() -> Iterator[None]:
         migrations_mod.MigrationError,
         chatgpt_import_mod.ChatGPTImportError,
         codex_rollout_mod.CodexRolloutError,
+        pins_mod.PinError,
     ) as e:
         raise click.ClickException(str(e)) from e
 
@@ -3760,6 +3762,92 @@ def graph(session: str | None, fmt: str) -> None:
     click.echo(text, nl=False)
 
 
+@cli.command("pin")
+@click.argument("artifact_id")
+@click.option("--local", is_flag=True,
+              help="Pin only for me — kept out of git in .vouch/pins.local.yaml.")
+@click.option("--expires", default=None,
+              help="Auto-drop the pin after this long (e.g. 7d) or at an ISO date.")
+@click.option("--note", default=None, help="Why this is pinned.")
+def pin_cmd(artifact_id: str, local: bool, expires: str | None,
+            note: str | None) -> None:
+    """Keep a claim or page in every context pack until unpinned."""
+    store = _load_store()
+    expires_at = None
+    with _cli_errors():
+        if expires is not None:
+            # An absolute date is already the answer, so only a duration gets
+            # mirrored. parse_since returns ISO input unchanged, and mirroring
+            # that around now turns a future date into a past one — the pin
+            # would be created already expired, silently.
+            try:
+                expires_at = datetime.fromisoformat(expires)
+            except ValueError:
+                # Not a date, so read it as a duration counted backwards and
+                # mirror it forwards.
+                now = datetime.now(UTC)
+                past = metrics_mod.parse_since(expires)
+                if past is None:
+                    # "all" and "" mean "no lower bound" to parse_since. As an
+                    # expiry that would silently mean "never", which is already
+                    # what omitting the flag does — so it is a typo, not a
+                    # request worth honouring.
+                    raise click.ClickException(
+                        f"--expires {expires!r}: expected a duration like '7d' "
+                        "or an ISO date like '2026-08-15'"
+                    ) from None
+                expires_at = now + (now - past)
+            else:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+        p = pins_mod.add_pin(
+            store, artifact_id, pinned_by=_whoami(), local=local,
+            expires_at=expires_at, note=note,
+        )
+    where = "local" if local else "shared"
+    click.echo(f"pinned {p.kind}/{p.artifact_id} ({where})")
+
+
+@cli.command("unpin")
+@click.argument("artifact_id")
+@click.option("--local", is_flag=True, help="Remove from the local pin set.")
+def unpin_cmd(artifact_id: str, local: bool) -> None:
+    """Stop pinning an artifact."""
+    store = _load_store()
+    with _cli_errors():
+        removed = pins_mod.remove_pin(store, artifact_id, local=local)
+    if not removed:
+        raise click.ClickException(
+            f"{artifact_id} is not in the {'local' if local else 'shared'} pin set"
+        )
+    click.echo(f"unpinned {artifact_id}")
+
+
+@cli.group(name="pins")
+def pins_group() -> None:
+    """The working set that always enters the context pack."""
+
+
+@pins_group.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit pins as JSON.")
+def pins_list(as_json: bool) -> None:
+    """Show every live pin, shared then local."""
+    store = _load_store()
+    with _cli_errors():
+        pins = pins_mod.load_pins(store)
+    if as_json:
+        _emit_json({"pins": [p.to_dict() | {"local": p.local} for p in pins]})
+        return
+    if not pins:
+        click.echo("no pins. `vouch pin <id>` keeps an artifact in every pack.")
+        return
+    for p in pins:
+        scope = "local " if p.local else "shared"
+        expiry = f"  expires {p.expires_at:%Y-%m-%d}" if p.expires_at else ""
+        note = f"  — {p.note}" if p.note else ""
+        click.echo(f"{scope}  {p.kind}/{p.artifact_id}{expiry}{note}")
+
+
 @cli.group()
 def provenance() -> None:
     """Provenance graph cache operations."""
@@ -3911,6 +3999,35 @@ def eval_recall(queries: str, k: int, baseline: str | None,
             raise click.ClickException(message)
 
 
+@eval_group.command("effectiveness")
+@click.option("--window", default=None,
+              help="Sessions to score: a duration (90d), an ISO date, or 'all'.")
+@click.option("--min-samples", default=None, type=int,
+              help="Sessions an artifact needs before a confident verdict is allowed.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True)
+def eval_effectiveness(window: str | None, min_samples: int | None, fmt: str) -> None:
+    """Rank approved artifacts by the outcome of the sessions they entered."""
+    from .eval.effectiveness import (
+        DEFAULT_MIN_SAMPLES,
+        DEFAULT_WINDOW,
+        compute,
+        format_report,
+    )
+
+    store = _load_store()
+    with _cli_errors():
+        result = compute(
+            store,
+            since=metrics_mod.parse_since(window or DEFAULT_WINDOW),
+            min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else min_samples,
+        )
+    if fmt == "json":
+        _emit_json(result)
+        return
+    click.echo(format_report(result))
+
+
 @cli.command()
 @click.option(
     "--embeddings/--no-embeddings",
@@ -3956,7 +4073,9 @@ def audit(tail: int, as_json: bool, project: str | None, agent: str | None) -> N
         project=project,
         agent=agent,
     )
-    events = list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer))[-tail:]
+    events = audit_mod.tail_events(
+        list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer)), tail
+    )
     if as_json:
         _emit_json({
             "viewer": {"project": viewer.project, "agent": viewer.agent},
