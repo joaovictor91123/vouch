@@ -62,7 +62,7 @@ def verify_all(store: KBStore, *, actor: str = "vouch-verify"
     results = [verify_source(store, s) for s in store.list_sources()]
     failed = [
         r.source.id for r in results
-        if not r.stored_ok or r.external_status == "drift"
+        if not r.stored_ok or r.external_status in {"drift", "missing"}
     ]
     audit.log_event(
         store.kb_dir, event="source.verify", actor=actor,

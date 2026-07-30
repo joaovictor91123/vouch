@@ -6,6 +6,19 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`kb.explain_ranking` — why a result ranked where it did** (#432): a
+  read-only breakdown of the retrieval pipeline. Per candidate it reports the
+  lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
+  stage — fusion, scope and status filters, recency, pages-first, rerank, the
+  pluggable strategy, the limit window, and the optional budget/citation gates
+  — with the rank and score delta that stage caused, plus the gate that kept or
+  dropped it (`kept` / `scope-filtered` / `status-filtered` / `limit-dropped` /
+  `budget-dropped` / `uncited`). Registered on MCP, JSONL and the CLI
+  (`vouch explain-ranking "<query>" [--format text|json]`). Viewer-scoped
+  through the same `filter_hits` as `kb.context`, so it cannot expose an
+  artifact the caller could not already retrieve, and it touches no write path.
+
 ### Fixed
 - **`setup_repo_guards.sh` no longer requires checks that cannot report**:
   `#630` removed the `trust-gate` workflow and the coderabbit gate removed
@@ -16,6 +29,17 @@ All notable changes to vouch are documented here. Format follows
   point at — every open pr into `test` is stuck this way today. the list is now
   the four ci contexts that actually run; re-running the script against the
   live ruleset clears the stale contexts.
+- **digest drops archived followup pages** (#625):
+  `followups_due` already skipped `done`/`dropped` metadata, but an
+  `ARCHIVED` page with `followup_status=open` and a past `due_at` still
+  appeared every morning — stale claims were filtered, pages were not.
+  mirror recall: archived followups leave the due list.
+- **`verify_all` / `doctor` treat missing externals like drift** (#622):
+  `vouch source verify` already marked `external_status=missing` as `!`,
+  but `verify_all`'s audit `failed` list and `health.doctor` only looked
+  for `drift`, so a deleted upstream file could leave doctor `ok: true`
+  while the CLI failed. missing now joins the failed set and emits a
+  `source_missing` warning.
 - **salience reflex excludes retracted claims**: `compute_salience` scanned
   every claim regardless of status, so the `_meta.vouch_salience` sidebar
   counted `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims in `claim_count` and

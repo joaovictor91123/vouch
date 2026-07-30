@@ -30,6 +30,34 @@ def test_verify_detects_external_drift(store: KBStore, tmp_path: Path) -> None:
     assert target.external_status == "drift"
 
 
+def test_verify_all_counts_missing_external_as_failed(
+    store: KBStore, tmp_path: Path,
+) -> None:
+    """CLI source verify treats missing as '!'; verify_all's audit failed
+    list must include it too (not only drift)."""
+    from vouch import audit
+
+    f = tmp_path / "doc.txt"
+    f.write_bytes(b"original")
+    src = store.put_source(
+        f.read_bytes(), title="doc",
+        locator=str(f.resolve()), source_type="file",
+    )
+    f.unlink()
+    results = verify.verify_all(store)
+    target = next(r for r in results if r.source.id == src.id)
+    assert target.stored_ok is True
+    assert target.external_status == "missing"
+
+    events = [
+        e for e in audit.read_events(store.kb_dir)
+        if e.event == "source.verify"
+    ]
+    assert events
+    assert src.id in events[-1].object_ids
+    assert events[-1].data["failed"] >= 1
+
+
 def test_verify_refuses_off_root_file_locator(store: KBStore, tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_bytes(b"secret")
