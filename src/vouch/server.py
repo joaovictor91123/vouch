@@ -1096,14 +1096,18 @@ def kb_doctor() -> dict[str, Any]:
 
 
 @mcp.tool()
-def kb_export(out_path: str) -> dict[str, Any]:
+def kb_export(out_path: str, exclude: list[str] | None = None) -> dict[str, Any]:
+    # exclude: subdir/file names to omit (e.g. "decided", "sessions") for a
+    # knowledge-only bundle — mirrors `vouch export --exclude` and the kb.export
+    # jsonl rpc, which both already accept it; this surface had dropped it.
     s = _store()
     dest = bundle.fenced_bundle_path(s, out_path)
-    manifest = bundle.export(s.kb_dir, dest=dest, actor=_agent())
+    manifest = bundle.export(s.kb_dir, dest=dest, actor=_agent(), exclude=tuple(exclude or ()))
     return {
         "bundle_id": manifest["bundle_id"],
         "files": len(manifest["files"]),
         "out": out_path,
+        "excluded": manifest["excluded"],
     }
 
 

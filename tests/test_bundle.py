@@ -927,6 +927,26 @@ def test_export_exclude_filters_subdirs(store: KBStore, tmp_path: Path) -> None:
     assert m_filt["bundle_id"] != m_full["bundle_id"]
 
 
+def test_kb_export_mcp_honors_exclude(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    # the mcp kb_export tool must accept `exclude` like the jsonl rpc and cli
+    # export do, so an agent (the primary mcp client) can produce a knowledge-only
+    # bundle. this surface silently dropped the filter.
+    from vouch.server import kb_export
+
+    src = store.put_source(b"e", title="doc")
+    store.put_claim(Claim(id="c1", text="alpha", evidence=[src.id]))
+    _write_session_file(store)
+    monkeypatch.chdir(store.root)
+
+    result = kb_export("knowledge.tar.gz", exclude=["decided", "sessions"])
+
+    assert result["excluded"] == ["decided", "sessions"]
+    with tarfile.open(store.root / "knowledge.tar.gz", "r:gz") as tar:
+        names = [m.name for m in tar.getmembers()]
+    assert not any(n.startswith("sessions/") for n in names)
+    assert any(n.startswith("claims/") for n in names)
+
+
 def test_filtered_bundle_imports_cleanly(store: KBStore, tmp_path: Path) -> None:
     src = store.put_source(b"e", title="doc")
     store.put_claim(Claim(id="c1", text="alpha", evidence=[src.id]))
