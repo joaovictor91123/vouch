@@ -21,32 +21,14 @@ import { DeleteArtifactButton } from './DeleteArtifactButton'
 import { ErrorCard } from './ErrorCard'
 import { Markdown } from './Markdown'
 import { useErrorToast, useToast } from './Toast'
+import { CitedText } from './CitedText'
+import { canRead, READ_METHOD, resolveKind } from '../lib/resolveArtifact'
+import type { ArtifactKind } from '../lib/citations'
 
 /** Every artifact kind the drawer can display. */
-export type OpenKind = 'claim' | 'page' | 'entity' | 'relation' | 'evidence' | 'source'
+export type OpenKind = ArtifactKind
 
 export type DrawerTarget = { kind: OpenKind; id: string } | null
-
-const READ_METHOD: Record<OpenKind, { method: string; param: string }> = {
-  claim: { method: 'kb.read_claim', param: 'claim_id' },
-  page: { method: 'kb.read_page', param: 'page_id' },
-  entity: { method: 'kb.read_entity', param: 'entity_id' },
-  relation: { method: 'kb.read_relation', param: 'relation_id' },
-  evidence: { method: 'kb.read_evidence', param: 'evidence_id' },
-  source: { method: 'kb.read_source', param: 'source_id' },
-}
-
-/** Does the endpoint advertise the read this kind needs? */
-function canRead(project: ProjectState, kind: string): kind is OpenKind {
-  return (
-    kind in READ_METHOD &&
-    (project.caps?.methods.includes(READ_METHOD[kind as OpenKind].method) ?? false)
-  )
-}
-
-// Relation endpoints and audit object_ids arrive without a kind — probe the
-// readable kinds in likelihood order and open the first that resolves.
-const RESOLVE_ORDER: OpenKind[] = ['claim', 'entity', 'page']
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -232,24 +214,29 @@ export function ArtifactDrawer({
 
   if (!target || !project) return null
 
-  // Kindless ids (relation endpoints, audit object ids): probe the readable
-  // kinds and open the first that resolves. Proposal ids resolve to nothing.
+  // Kindless ids (citations in prose, relation endpoints, audit object ids):
+  // probe the readable kinds and open the first that resolves. Proposal ids
+  // resolve to nothing.
   const resolveOpen =
     onOpen &&
     (async (id: string) => {
-      for (const kind of RESOLVE_ORDER) {
-        if (!canRead(project, kind)) continue
-        try {
-          await rpc(project.conn, READ_METHOD[kind].method, { [READ_METHOD[kind].param]: id })
-          onOpen(kind, id)
-          return
-        } catch {
-          // not this kind — try the next
-        }
+      const kind = await resolveKind(project, id)
+      if (kind) {
+        onOpen(kind, id)
+        return
       }
       toast('error', `${id.slice(0, 24)} is not a readable artifact (a proposal, or deleted)`)
     })
   const resolve = resolveOpen ? (id: string) => void resolveOpen(id) : undefined
+
+  // An id lifted out of prose: honour the kind when the marker named one,
+  // otherwise fall back to the probe.
+  const openId = onOpen
+    ? (id: string, kind?: ArtifactKind) => {
+        if (kind) onOpen(kind, id)
+        else resolve?.(id)
+      }
+    : undefined
 
   const a = artifact.data
 
@@ -281,7 +268,9 @@ export function ArtifactDrawer({
 
         {a && target.kind === 'claim' && (
           <>
-            <p className="mb-3 text-sm leading-relaxed text-ink">{(a as unknown as Claim).text}</p>
+            <p className="mb-3 text-sm leading-relaxed text-ink">
+              <CitedText text={(a as unknown as Claim).text} onOpenId={openId} />
+            </p>
             <Row label="type">{String(a.type)}</Row>
             <Row label="status">{String(a.status)}</Row>
             <Row label="confidence">{Math.round(Number(a.confidence) * 100)}%</Row>
@@ -294,7 +283,7 @@ export function ArtifactDrawer({
             <Row label="type">{String(a.type)}</Row>
             <Row label="status">{String(a.status)}</Row>
             <div className="mt-3">
-              <Markdown>{(a as unknown as Page).body}</Markdown>
+              <Markdown onOpenId={openId}>{(a as unknown as Page).body}</Markdown>
             </div>
           </>
         )}

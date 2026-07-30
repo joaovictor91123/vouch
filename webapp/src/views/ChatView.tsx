@@ -4,11 +4,15 @@ import type { FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ArtifactDrawer } from '../components/ArtifactDrawer'
 import type { DrawerTarget, OpenKind } from '../components/ArtifactDrawer'
+import { CitedText } from '../components/CitedText'
 import { EmptyState } from '../components/EmptyState'
+import type { OpenIdHandler } from '../components/IdChip'
 import { Markdown } from '../components/Markdown'
 import { useToast } from '../components/Toast'
 import { useConnection } from '../connection/ConnectionContext'
-import { parseAnswer, parseSnippet } from '../lib/citations'
+import { parseSnippet } from '../lib/citations'
+import type { ArtifactKind } from '../lib/citations'
+import { resolveKind } from '../lib/resolveArtifact'
 import { runClaude, takeStartHere } from '../lib/claude'
 import type { ClaudeEvent } from '../lib/claude'
 import { rpc, VouchRpcError } from '../lib/rpc'
@@ -53,13 +57,16 @@ function ConfidenceBadge({ level }: { level?: Confidence }) {
 
 function AnswerBody({
   result,
-  onCite,
+  onOpenId,
 }: {
   result: SynthesizeResult
-  onCite: (kind: 'claim' | 'page', id: string) => void
+  onOpenId?: OpenIdHandler
 }) {
-  const citeKind = (id: string): 'claim' | 'page' =>
-    result.pages?.includes(id) ? 'page' : 'claim'
+  // synthesize verifies every surviving citation against the claims and pages
+  // it offered the drafter, so the cited-id lists settle the kind without a
+  // read. Anything else falls through to the drawer's probe.
+  const citeKind = (id: string): ArtifactKind | undefined =>
+    result.pages?.includes(id) ? 'page' : result.claims?.includes(id) ? 'claim' : undefined
   if (result.answer === '') {
     return (
       <div>
@@ -80,20 +87,7 @@ function AnswerBody({
   return (
     <div>
       <p className="text-sm leading-7 text-ink">
-        {parseAnswer(result.answer).map((seg, i) =>
-          seg.kind === 'text' ? (
-            <span key={i}>{seg.text}</span>
-          ) : (
-            <button
-              key={i}
-              onClick={() => onCite(citeKind(seg.claimId), seg.claimId)}
-              className="mx-0.5 inline-block max-w-72 truncate rounded border border-accent/40 bg-accent/10 px-1.5 align-middle font-mono text-[11px] leading-5 text-accent-2 transition hover:bg-accent/20"
-              title={seg.claimId}
-            >
-              {seg.claimId}
-            </button>
-          ),
-        )}
+        <CitedText text={result.answer} onOpenId={onOpenId} kindFor={citeKind} />
       </p>
       <div className="mt-2 flex items-center gap-2">
         <ConfidenceBadge level={result._meta?.synthesis_confidence} />
@@ -195,6 +189,23 @@ export function ChatView() {
   const [activity, setActivity] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<DrawerTarget>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Any id lifted out of prose — a synthesize citation, a `[claim: …]` marker
+  // in a Claude answer. A named kind opens straight away; a bare id is probed.
+  const openId: OpenIdHandler = (id, kind) => {
+    if (!active) return
+    // A named kind is authoritative — synthesize verified it, or the marker
+    // spelled it out. Open it and let a failed read report itself; probing
+    // would only guess worse.
+    if (kind) {
+      setDrawer({ kind, id })
+      return
+    }
+    void resolveKind(active, id).then((resolved) => {
+      if (resolved) setDrawer({ kind: resolved, id })
+      else toast('error', `${id.slice(0, 24)} is not a readable artifact (a proposal, or deleted)`)
+    })
+  }
 
   // Start Here handoff from the Claims tab: enter claude mode bound to the
   // claim's originating session, with the claim quoted in the composer.
@@ -392,7 +403,7 @@ export function ChatView() {
                       {msg.isError ? (
                         <p className="whitespace-pre-wrap text-sm text-accent-2">{msg.text}</p>
                       ) : (
-                        <Markdown>{msg.text}</Markdown>
+                        <Markdown onOpenId={openId}>{msg.text}</Markdown>
                       )}
                     </div>
                   </div>
@@ -412,7 +423,7 @@ export function ChatView() {
                 return (
                   <div key={i} className="flex">
                     <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-rule bg-paper-2 px-4 py-3">
-                      <AnswerBody result={msg.result} onCite={(kind, id) => setDrawer({ kind, id })} />
+                      <AnswerBody result={msg.result} onOpenId={openId} />
                     </div>
                   </div>
                 )
