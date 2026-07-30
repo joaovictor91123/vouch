@@ -23,6 +23,7 @@ from vouch.models import (
     RelationType,
 )
 from vouch.proposals import (
+    DeadClaimRefsError,
     ProposalError,
     approve,
     check_approvable,
@@ -642,8 +643,11 @@ def test_approve_page_update_rejects_stale_claim_ref(store: KBStore) -> None:
         proposed_by="vault-sync", slug_hint="p1",
     )
     (store.kb_dir / "claims" / "c1.yaml").unlink()
-    with pytest.raises(ProposalError, match="unknown claim"):
+    # DeadClaimRefsError (a ProposalError) is the specific refusal: the
+    # reviewer may retry with drop_missing_claims, never write the dangler.
+    with pytest.raises(DeadClaimRefsError, match="missing claim"):
         approve(store, pr.id, approved_by="reviewer")
+    assert store.get_page("p1").body == "body"
 
 
 # --- evidence -------------------------------------------------------------
