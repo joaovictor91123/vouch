@@ -20,11 +20,58 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.explain_ranking` no longer leaks status-filtered candidate text**
+  (#650): a retracted/superseded/redacted claim or archived page correctly
+  reported `gate: "status-filtered"`, but its `summary` was still sourced
+  from the pre-status-filter candidate set, so the full text came back
+  anyway. `#640` fixed the equivalent leak for scope-filtered candidates;
+  this extends the same withholding to the status gate — summaries now
+  come from the post-status-filter set, matching what `kb.search` and
+  `kb.context` already exclude.
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
+- **`mask_secrets` now catches underscore-adjacent credential key names**
+  (#646): the `\b` word boundaries around the keyword alternation treat `_`
+  as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
+  and `AWS_SECRET_ACCESS_KEY=` — the dominant real-world naming shape for
+  these env-vars — passed through unmasked. switched to explicit
+  alphanumeric lookaround so underscore-delimited segments match while
+  substrings like `tokenized=` stay excluded. affects both the capture-time
+  guard and the `vouch redact` remediation backstop, which share the regex.
+- **triage ignores archived twins for duplication** (#638):
+  claim/page pools used every approved artifact, so an archived claim
+  (or archived page title) with the same text forced `duplication_risk=1.0`
+  and an advisory reject on re-file. pools and embedding hits now skip
+  retracted claims and archived pages, matching search/recall/digest.
+- **`setup_repo_guards.sh` no longer requires checks that cannot report**:
+  `#630` removed the `trust-gate` workflow and the coderabbit gate removed
+  `coderabbit-approved`, but both contexts stayed in the script's
+  `required_status_checks`, so the provisioning source still declared two
+  checks with no workflow behind them. a required context that never reports
+  leaves the pr pending rather than failing, so it blocks with no red x to
+  point at — every open pr into `test` is stuck this way today. the list is now
+  the four ci contexts that actually run; re-running the script against the
+  live ruleset clears the stale contexts.
+- **hooks quoted `"false"` disables short_circuit / prompt_gate** (#631):
+  `#620` / `#558` fixed most loaders, but `short_circuit_cfg` and
+  `prompt_gate_cfg` still used bare `bool()`, so a quoted
+  `enabled: "false"` silently turned those features *on*. both now
+  use `coerce_bool`.
 - **digest drops archived followup pages** (#625):
   `followups_due` already skipped `done`/`dropped` metadata, but an
   `ARCHIVED` page with `followup_status=open` and a past `due_at` still
   appeared every morning — stale claims were filtered, pages were not.
   mirror recall: archived followups leave the due list.
+- **`kb.explain_ranking` no longer returns the summary of a scope-filtered
+  candidate**: the report listed every candidate the pipeline saw, sourcing
+  summaries from the pre-scope fused set, so a viewer got back the claim text
+  of artifacts `kb.search` and `kb.context` withhold for that same viewer — the
+  opposite of the module's stated scoping invariant. the candidate is still
+  listed with its `scope-filtered` gate, since naming the gate that hid it is
+  the point of the report; only the summary is withheld.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked

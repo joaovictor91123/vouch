@@ -40,8 +40,11 @@ _BEARER = re.compile(r"(?i)\b(Bearer)\s+[A-Za-z0-9._~+/=-]{10,}")
 # quoted-key shapes (`"password": "..."`). Quoted values are matched as a whole
 # unit (whitespace + escapes allowed) and their delimiters are preserved so the
 # redacted form stays structurally valid and cannot leak a trailing token.
+# Alphanumeric lookaround, not \b — \b treats `_` as a word character, so it
+# never matches the keyword inside snake_case names like `access_token` or
+# `DB_PASSWORD`, which is the dominant real-world shape for these env-vars.
 _ASSIGNMENT = re.compile(
-    r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b"
+    r"(?i)(?<![A-Za-z0-9])(api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)(?![A-Za-z0-9])"
     r"([\"']?\s*[:=]\s*)"
     r"(?:"
     r"\"((?:\\.|[^\"\\]){6,})\""

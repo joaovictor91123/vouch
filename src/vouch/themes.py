@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from .config_coerce import coerce_bool
 from .models import ClaimStatus, ProposalStatus
 from .proposals import ProposalError, propose_page
 from .storage import KBStore
@@ -70,8 +71,7 @@ def _load_theme_config(store: KBStore) -> dict[str, Any]:
     if not isinstance(themes_cfg, dict):
         themes_cfg = {}
 
-    enabled = themes_cfg.get("enabled", True)
-    enabled = bool(enabled) if isinstance(enabled, bool) else True
+    enabled = coerce_bool(themes_cfg.get("enabled", True), True)
 
     ms = themes_cfg.get("min_sessions", _DEFAULT_MIN_SESSIONS)
     ms = ms if isinstance(ms, int) and ms > 0 else _DEFAULT_MIN_SESSIONS

@@ -179,8 +179,12 @@ def build(
     stale.sort(key=lambda pair: pair[0])
     stale_rows = [row for _, row in stale[:limit]]
 
+    # archived pages are excluded for the same reason the stale loop above
+    # skips retired claims: a followup that has been archived is no longer
+    # something the reviewer is being asked to act on, and leaving it in the
+    # due list makes archiving decorative on the surface it matters most.
     due_pages = filter_pages(
-        store.list_pages(),
+        [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED],
         kind="followup",
         before={"due_at": now.date().isoformat()},
     )

@@ -170,6 +170,130 @@ def test_duplication_risk_heuristic_no_match_for_unrelated_text(
     assert "heuristic backend" in dup["reason"]
 
 
+def test_duplication_risk_ignores_archived_claim_twin(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # archived twin must not auto-reject a re-filed claim as a near-duplicate
+    from vouch.models import ClaimStatus
+
+    _no_embedder(monkeypatch)
+    _enable_triage(store)
+    src = store.put_source(b"evidence")
+    text = "prefer postgres over mysql for this service"
+    store.put_claim(
+        Claim(id="old", text=text, evidence=[src.id], status=ClaimStatus.ARCHIVED),
+    )
+    propose_claim(store, text=text, evidence=[src.id], proposed_by="agent")
+    [result] = triage.triage_pending(store)
+    block = result["_meta"]["vouch_triage"]
+    assert block["signals"]["duplication_risk"]["score"] == 0.0
+    assert block["recommendation"] != "reject"
+
+
+def test_duplication_risk_ignores_archived_page_title(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vouch.models import Page, PageStatus
+    from vouch.proposals import propose_page
+
+    _no_embedder(monkeypatch)
+    _enable_triage(store)
+    title = "deploy runbook for the edge fleet"
+    store.put_page(
+        Page(id="old-page", title=title, body="retired", status=PageStatus.ARCHIVED),
+    )
+    propose_page(store, title=title, body="fresh copy", proposed_by="agent")
+    [result] = triage.triage_pending(store)
+    dup = result["_meta"]["vouch_triage"]["signals"]["duplication_risk"]
+    assert dup["score"] == 0.0
+    assert "old-page" not in dup["reason"]
+
+
+def test_live_embedding_hits_drops_retracted_keeps_missing(
+    store: KBStore,
+) -> None:
+    from vouch.models import ClaimStatus
+
+    src = store.put_source(b"evidence")
+    store.put_claim(Claim(id="live", text="alive", evidence=[src.id]))
+    store.put_claim(
+        Claim(id="dead", text="gone", evidence=[src.id], status=ClaimStatus.ARCHIVED),
+    )
+    hits = [
+        {"artifact_kind": "claim", "artifact_id": "live", "cosine": 0.99},
+        {"artifact_kind": "claim", "artifact_id": "dead", "cosine": 0.99},
+        {"artifact_kind": "claim", "artifact_id": "ghost", "cosine": 0.99},
+        {"artifact_kind": "proposal", "artifact_id": "pending-1", "cosine": 0.99},
+    ]
+    kept = {h["artifact_id"] for h in triage._live_embedding_hits(store, hits)}
+    assert kept == {"live", "ghost", "pending-1"}
+
+
+def test_topical_fit_scores_skips_retracted_artifacts(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vouch.models import ClaimStatus, Page, PageStatus
+
+    class _Emb:
+        def encode(self, text: str) -> list[float]:
+            return [0.1] * 4
+
+    src = store.put_source(b"evidence")
+    store.put_claim(
+        Claim(id="arch", text="a", evidence=[src.id], status=ClaimStatus.ARCHIVED),
+    )
+    store.put_claim(Claim(id="live", text="b", evidence=[src.id]))
+    store.put_page(Page(id="parch", title="p", body="x", status=PageStatus.ARCHIVED))
+    store.put_page(Page(id="plive", title="q", body="y"))
+
+    def _fake_search(*_a: object, **_k: object) -> list[tuple]:
+        return [
+            ("claim", "new-claim", "", 0.5),  # exclude_id — skipped
+            ("claim", "near-dup", "", 0.96),  # at/above dup threshold — skipped
+            ("claim", "arch", "", 0.5),
+            ("claim", "live", "", 0.4),
+            ("claim", "missing-claim", "", 0.45),
+            ("page", "parch", "", 0.5),
+            ("page", "plive", "", 0.41),
+            ("page", "missing-page", "", 0.42),
+        ]
+
+    monkeypatch.setattr("vouch.index_db.search_embedding", _fake_search)
+    monkeypatch.setattr(
+        "vouch.embeddings.similarity.similarity_threshold", lambda _store: 0.95,
+    )
+    proposal = Proposal(
+        id="p1", kind=ProposalKind.CLAIM, proposed_by="agent",
+        payload={"text": "query text", "id": "new-claim"},
+    )
+    assert triage._topical_fit_scores(store, proposal, _Emb()) == [
+        0.4, 0.45, 0.41, 0.42,
+    ]
+
+
+def test_contradiction_risk_skips_archived_embedding_hit(
+    store: KBStore,
+) -> None:
+    from vouch.models import ClaimStatus
+
+    src = store.put_source(b"evidence")
+    store.put_entity(Entity(id="api", name="API", type=EntityType.CONCEPT))
+    store.put_claim(Claim(
+        id="arch", text="the api requires an auth token for every request",
+        evidence=[src.id], entities=["api"], status=ClaimStatus.ARCHIVED,
+    ))
+    proposal = Proposal(
+        id="p1", kind=ProposalKind.CLAIM, proposed_by="agent",
+        payload={
+            "text": "the api does not require an auth token for every request",
+            "entities": ["api"], "evidence": [src.id],
+        },
+    )
+    hits = [{"artifact_kind": "claim", "artifact_id": "arch", "cosine": 0.92}]
+    out = triage._signal_contradiction_risk(store, proposal, hits)
+    assert out["score"] == 0.0
+
+
 def test_duplication_risk_relation_exact_match(
     store: KBStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
