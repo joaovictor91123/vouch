@@ -245,3 +245,186 @@ def test_cli_exposes_the_goal_commands() -> None:
 
     names = set(cli.commands)
     assert {"propose-goal", "goals", "goal-status"} <= names
+
+
+# --- the surfaces, exercised rather than merely registered -----------------
+
+
+def _cli(store: KBStore, args: list[str]):
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    return CliRunner().invoke(cli, args, env={"VOUCH_KB_PATH": str(store.kb_dir)})
+
+
+def test_cli_round_trip_propose_list_and_move(store: KBStore) -> None:
+    proposed = _cli(store, ["propose-goal", "--title", "ship the typed loader",
+                            "--detail", "config.yaml first",
+                            "--tag", "infra", "--rationale", "q3 objective"])
+    assert proposed.exit_code == 0, proposed.output
+    proposal_id = proposed.output.strip()
+
+    # still nothing durable — the gate is the point
+    assert "no open goals" in _cli(store, ["goals"]).output
+
+    approve(store, proposal_id, approved_by="reviewer")
+    listed = _cli(store, ["goals"])
+    assert listed.exit_code == 0, listed.output
+    assert "ship the typed loader" in listed.output
+    assert "[open]" in listed.output
+
+    goal_id = store.list_goals()[0].id
+    moved = _cli(store, ["goal-status", goal_id, "done", "--reason", "shipped"])
+    assert moved.exit_code == 0, moved.output
+    assert f"{goal_id} -> done" in moved.output
+
+    assert "no open goals" in _cli(store, ["goals"]).output
+    assert "[done]" in _cli(store, ["goals", "--status", "all"]).output
+
+
+def test_cli_reports_an_empty_all_listing(store: KBStore) -> None:
+    result = _cli(store, ["goals", "--status", "all"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "no goals"
+
+
+def test_mcp_goal_tools_round_trip(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch import server
+
+    monkeypatch.chdir(store.root)
+    proposed = server.kb_propose_goal(title="ship the typed loader")
+    assert proposed["status"] == "pending"
+    approve(store, proposed["proposal_id"], approved_by="reviewer")
+
+    listed = server.kb_list_goals()
+    assert [item["title"] for item in listed["items"]] == ["ship the typed loader"]
+
+    goal_id = listed["items"][0]["id"]
+    moved = server.kb_set_goal_status(goal_id, "blocked", reason="waiting on #1")
+    assert moved["status"] == "blocked"
+    assert moved["history"]
+
+
+def test_mcp_goal_tools_surface_errors_as_value_errors(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The MCP contract: a host sees ValueError, never an internal exception.
+    from vouch import server
+
+    monkeypatch.chdir(store.root)
+    with pytest.raises(ValueError):
+        server.kb_propose_goal(title="   ")
+    with pytest.raises(ValueError, match="unknown goal status"):
+        server.kb_list_goals(status="nonsense")
+    with pytest.raises(ValueError):
+        server.kb_set_goal_status("no-such-goal", "done")
+
+
+def test_jsonl_goal_handlers_round_trip(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch.jsonl_server import handle_request
+
+    monkeypatch.chdir(store.root)
+    proposed = handle_request({
+        "id": "g1", "method": "kb.propose_goal",
+        "params": {"title": "ship the typed loader"},
+    })
+    assert proposed["ok"] is True
+    assert proposed["result"]["kind"] == "goal"
+    approve(store, proposed["result"]["proposal_id"], approved_by="reviewer")
+
+    goal_id = store.list_goals()[0].id
+    moved = handle_request({
+        "id": "g2", "method": "kb.set_goal_status",
+        "params": {"goal_id": goal_id, "status": "done"},
+    })
+    assert moved["ok"] is True
+    assert moved["result"]["status"] == "done"
+    assert moved["result"]["history"]
+
+
+# --- the write gates -------------------------------------------------------
+
+
+def test_an_unapprovable_goal_never_enters_the_queue(store: KBStore) -> None:
+    """Validated at propose time for the same reason entities are: a payload
+    that can never pass approve() must not sit in the queue waiting for
+    someone to notice."""
+    with pytest.raises(ProposalError, match="goal title is empty"):
+        propose_goal(store, title="   ", proposed_by="agent")
+    # and a payload the model rejects for any other reason, e.g. a non-string
+    # tag arriving from a transport that did not type-check it
+    with pytest.raises(ProposalError, match="invalid goal payload"):
+        propose_goal(
+            store, title="a real goal", tags=[123],  # type: ignore[list-item]
+            proposed_by="agent",
+        )
+    assert store.list_proposals(ProposalStatus.PENDING) == []
+
+
+def test_approve_refuses_a_goal_payload_corrupted_after_filing(
+    store: KBStore
+) -> None:
+    pr = propose_goal(store, title="a real goal", proposed_by="agent")
+    broken = pr.model_copy(deep=True)
+    broken.payload["status"] = "not-a-status"
+    store.update_proposal(broken)
+    with pytest.raises(ProposalError, match="invalid goal payload"):
+        approve(store, pr.id, approved_by="reviewer")
+
+
+def test_approve_refuses_a_goal_citing_an_artifact_that_vanished(
+    store: KBStore
+) -> None:
+    src = store.put_source(b"evidence")
+    claim_pr = propose_claim(
+        store, text="the loader is typed", evidence=[src.id], proposed_by="agent"
+    )
+    claim = approve(store, claim_pr.id, approved_by="reviewer")
+    pr = propose_goal(
+        store, title="finish the loader", claims=[claim.id], proposed_by="agent"
+    )
+    store._claim_path(claim.id).unlink()  # the artifact goes away before review
+    with pytest.raises(ProposalError, match="unknown claim"):
+        approve(store, pr.id, approved_by="reviewer")
+
+
+def test_put_goal_rejects_dangling_references(store: KBStore) -> None:
+    with pytest.raises(ValueError, match="unknown claim"):
+        store.put_goal(Goal(id="g-a", title="t", claims=["no-such-claim"]))
+    with pytest.raises(ValueError, match="unknown entity"):
+        store.put_goal(Goal(id="g-b", title="t", entities=["no-such-entity"]))
+
+
+def test_put_goal_refuses_to_overwrite_an_existing_slug(store: KBStore) -> None:
+    store.put_goal(Goal(id="g-dup", title="first"))
+    with pytest.raises(ValueError, match="already exists"):
+        store.put_goal(Goal(id="g-dup", title="second"))
+
+
+def test_update_goal_requires_the_goal_to_exist(store: KBStore) -> None:
+    with pytest.raises(ArtifactNotFoundError):
+        store.update_goal(Goal(id="g-missing", title="t"))
+
+
+def test_list_goals_on_a_kb_with_no_goals_dir(store: KBStore) -> None:
+    # A KB bootstrapped before goals existed: reading must degrade, not raise.
+    goals_dir = store.kb_dir / "goals"
+    if goals_dir.exists():
+        for child in goals_dir.iterdir():
+            child.unlink()
+        goals_dir.rmdir()
+    assert store.list_goals() == []
+
+
+def test_digest_says_how_many_open_goals_it_elided(store: KBStore) -> None:
+    for i in range(6):
+        _approved_goal(store, title=f"objective {i}")
+    d = digest.build(store, limit=2)
+    rendered = digest.render_text(d)
+    assert d.open_goals_total == 6
+    assert f"... and {d.open_goals_total - len(d.open_goals)} more" in rendered
