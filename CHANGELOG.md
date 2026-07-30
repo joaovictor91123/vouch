@@ -45,6 +45,10 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
+  `_list_decided` parsed every decided proposal strictly, so a single bad file
+  aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
+  same resilience as `list_proposals` / `list_pages`.
 - **rerank / recency / triage quoted `"true"` stays off** (#658):
   `retrieval.rerank.enabled`, `retrieval.recency.enabled` and
   `triage.enabled` were the last three readers still on the
