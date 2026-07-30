@@ -55,6 +55,15 @@ All notable changes to vouch are documented here. Format follows
   end-to-end: a strategy's `rank()` could silently delete an arbitrary
   file via `os.remove` with no error, timeout, or blocked-call signal.
   All eight events now hit the same blocklist as `open`-writes.
+- **`kb.detect_themes` no longer leaks claim and session ids the viewer
+  cannot retrieve** (#657): the detector filtered claims on status and
+  `approved_by` but never on `ArtifactScope`, so a private or cross-project
+  claim contributed its id — and the session that produced it — to a
+  returned `ThemeCluster`. `propose_theme` writes both lists into the theme
+  page body, so the leak became committed yaml on approval rather than
+  stopping at a response. `detect_themes` now filters through
+  `scoping.is_visible` like `kb.recall` and the salience sidebar already do,
+  and takes an optional `viewer` for callers that carry one.
 - **security: empty-quote receipts no longer clear the auto-approve gate**
   (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
   guarded only on `quote is None`, not an empty string. An `Evidence` with
