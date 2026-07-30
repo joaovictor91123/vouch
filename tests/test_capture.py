@@ -633,6 +633,144 @@ def test_observations_from_transcript_rebuilds_tool_activity(tmp_path: Path) -> 
     assert any(o.get("cmd") == "pytest -q" for o in obs)
 
 
+def test_observations_from_transcript_edge_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cover parse failure, non-dict messages, errored tools, and skips."""
+    # unreadable / missing path → empty (OSError path)
+    assert cap.observations_from_transcript(tmp_path / "missing.jsonl") == []
+
+    # parse raises → empty
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text("{not json\n", encoding="utf-8")
+
+    def _boom(_path):
+        raise ValueError("bad transcript")
+
+    monkeypatch.setattr(
+        "vouch.transcript.parse_claude_transcript", _boom,
+    )
+    assert cap.observations_from_transcript(broken) == []
+
+    def _odd(_path):
+        return {
+            "messages": [
+                "skip-me",
+                {
+                    "blocks": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "false"},
+                            "result": {
+                                "content": "exit 1",
+                                "is_error": True,
+                            },
+                        },
+                        {
+                            "type": "tool_use",
+                            "name": "NotARealTool",
+                            "input": {},
+                            "result": {"content": "x"},
+                        },
+                        "not-a-block",
+                    ],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "vouch.transcript.parse_claude_transcript", _odd,
+    )
+    obs = cap.observations_from_transcript(broken)
+    assert len(obs) == 1
+    assert obs[0]["tool"] == "Bash"
+    assert obs[0]["summary"].startswith("Command failed:")
+
+
+def test_observe_cli_skips_when_realtime_disabled(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    # default starter has realtime: false
+    payload = _json.dumps({
+        "session_id": "s-rt-off",
+        "cwd": str(store.root),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(store.root / "a.py")},
+        "tool_response": "ok",
+    })
+    result = CliRunner().invoke(cli, ["capture", "observe"], input=payload)
+    assert result.exit_code == 0, result.output
+    out = _json.loads(result.output)
+    assert out["skipped"] == "realtime-disabled"
+    assert not cap.buffer_path(store, "s-rt-off").exists()
+
+
+def test_observe_cli_silent_when_capture_disabled(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    store.config_path.write_text(
+        "capture:\n  enabled: false\n  realtime: true\n", encoding="utf-8",
+    )
+    payload = _json.dumps({
+        "session_id": "s-off",
+        "cwd": str(store.root),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(store.root / "a.py")},
+        "tool_response": "ok",
+    })
+    result = CliRunner().invoke(cli, ["capture", "observe"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == ""
+    assert not cap.buffer_path(store, "s-off").exists()
+
+
+def test_observe_cli_noop_when_no_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No project KB and no personal fallback → observe exits quietly."""
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from vouch import hub
+    from vouch.cli import cli
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv(hub.REGISTRY_ENV, str(fake_home / "registry.yaml"))
+    monkeypatch.delenv("VOUCH_KB_PATH", raising=False)
+    monkeypatch.delenv("VOUCH_PROJECT_DIR", raising=False)
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    payload = _json.dumps({
+        "session_id": "s-nostore",
+        "cwd": str(nowhere),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(nowhere / "a.py")},
+        "tool_response": "ok",
+    })
+    result = CliRunner().invoke(cli, ["capture", "observe"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == ""
+
+
 def test_finalize_uses_transcript_when_realtime_off(
     store: KBStore, tmp_path: Path,
 ) -> None:
