@@ -44,6 +44,16 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
+- **core PRs can auto-merge, on two mechanical bars.** the blanket "core
+  is never armed" refusal is gone; both authorization surfaces (the
+  `auto-merge` label and the `/auto-merge` comment) now route through one
+  reusable `arm-auto-merge.yml`, which arms any klass only when the
+  `diff coverage` check is green on that head sha *and* the PR carries a
+  closing reference to an issue plind-junior opened. neither bar is
+  recomputed in the write-token job — both are read as metadata, so no PR
+  code executes there. the owner-only guard and deauthorize-on-push are
+  unchanged, and folding the two arming paths into one file removes the
+  drift that left `/auto-merge` with no coverage check at all.
 - **CodeRabbit's verdict no longer gates anything.** the
   `coderabbit-approved` commit status, the 3-strike auto-close, and the
   daily stale-pr reaper are removed, along with the `coderabbit-gate` and
