@@ -794,6 +794,23 @@ def _h_eval_embeddings(p: dict) -> dict:
     )
 
 
+def _h_effectiveness(p: dict) -> dict:
+    from .eval.effectiveness import DEFAULT_MIN_SAMPLES, DEFAULT_WINDOW, compute
+
+    # One shared implementation across MCP / JSONL / CLI. Read-only: it reads
+    # the audit log and the retrieval-event log and reports.
+    # `or` rather than a .get default: an explicit {"window": null} on the wire
+    # puts None in the dict, and str(None) is the literal "None", which
+    # parse_since rejects with a user-facing error instead of defaulting.
+    window = p.get("window") or DEFAULT_WINDOW
+    min_samples = p.get("min_samples")
+    return compute(
+        _store(),
+        since=metrics_mod.parse_since(str(window)),
+        min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else int(min_samples),
+    )
+
+
 def _h_embeddings_stats(_: dict) -> dict:
     from . import index_db
     from .embeddings.cache import query_cache_stats
@@ -967,6 +984,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.reindex_embeddings": _h_reindex_embeddings,
     "kb.dedup_scan": _h_dedup_scan,
     "kb.eval_embeddings": _h_eval_embeddings,
+    "kb.effectiveness": _h_effectiveness,
     "kb.embeddings_stats": _h_embeddings_stats,
     "kb.why": _h_why,
     "kb.trace": _h_trace,

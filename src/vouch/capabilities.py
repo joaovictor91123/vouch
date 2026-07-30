@@ -92,6 +92,7 @@ METHODS = [
     "kb.reindex_embeddings",
     "kb.dedup_scan",
     "kb.eval_embeddings",
+    "kb.effectiveness",
     "kb.embeddings_stats",
     "kb.why",
     "kb.trace",
