@@ -7,6 +7,7 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **hot-memory sidebar still fills after exclude_ids** (#597): compute_hot_memory used to truncate to limit then drop excluded ids, so search/context sidebars under-filled whenever hit ids overlapped the hot set. exclusions are applied while ranking so the sidebar still returns up to limit other recent claims.
 - **sandbox docker argv on Windows** (#582): omit `--user uid:gid` when
   `os.getuid` / `os.getgid` are unavailable so sandboxed dual-solve no
   longer raises `AttributeError` while building the docker command.
