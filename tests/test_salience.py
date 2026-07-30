@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from vouch import health, salience
-from vouch.models import Claim, Entity, EntityType
+from vouch.models import Claim, ClaimStatus, Entity, EntityType
 from vouch.storage import KBStore
 
 
@@ -105,3 +105,77 @@ def test_window_bounds_buffer(store: KBStore) -> None:
     for i in range(20):
         salience.record_query("sess-1", f"q{i}", window=8)
     assert len(salience._BUFFERS["sess-1"].queries) == 8
+
+
+@pytest.mark.parametrize(
+    "retracted", [ClaimStatus.ARCHIVED, ClaimStatus.SUPERSEDED, ClaimStatus.REDACTED]
+)
+def test_compute_salience_excludes_retracted_claims(
+    store: KBStore, retracted: ClaimStatus,
+) -> None:
+    """Each retracted status must leave the sidebar, like every read surface.
+
+    ``c0`` sorts ahead of the live ``c1``, so an unfiltered scan both
+    over-counts and names the retracted claim as the entity's top hit.
+    """
+    src = store.list_sources()[0]
+    store.put_claim(Claim(
+        id="c0", text="auth uses sessions", evidence=[src.id],
+        entities=["jwt"], status=retracted,
+    ))
+    health.rebuild_index(store)
+
+    for _ in range(3):
+        salience.record_query("sess-1", "jwt")
+    rec = salience.compute_salience(store, "sess-1")[0]
+
+    assert rec["claim_count"] == 1
+    assert rec["top_claim_id"] == "c1"
+
+
+def test_entity_with_only_retracted_claims_reports_none(store: KBStore) -> None:
+    """A matched entity stays in the sidebar, but with nothing to prefetch.
+
+    Entities carry no status of their own, so the record is still emitted —
+    it just honestly reports zero live claims instead of pointing the agent
+    at a retracted one.
+    """
+    store.put_entity(Entity(id="saml", name="SAML", type=EntityType.CONCEPT))
+    src = store.list_sources()[0]
+    store.put_claim(Claim(
+        id="c9", text="saml is the login path", evidence=[src.id],
+        entities=["saml"], status=ClaimStatus.SUPERSEDED,
+    ))
+    health.rebuild_index(store)
+
+    for _ in range(3):
+        salience.record_query("sess-1", "saml")
+    rec = next(
+        r for r in salience.compute_salience(store, "sess-1")
+        if r["entity_id"] == "saml"
+    )
+
+    assert rec["claim_count"] == 0
+    assert rec["top_claim_id"] is None
+
+
+def test_attached_sidebar_never_names_a_retracted_claim(
+    store: KBStore, monkeypatch,
+) -> None:
+    """End-to-end through the jsonl read path that ships the sidebar."""
+    from vouch import jsonl_server
+
+    src = store.list_sources()[0]
+    store.put_claim(Claim(
+        id="c0", text="auth uses sessions", evidence=[src.id],
+        entities=["jwt"], status=ClaimStatus.REDACTED,
+    ))
+    health.rebuild_index(store)
+    monkeypatch.setattr(jsonl_server, "_store", lambda: store)
+
+    for _ in range(3):
+        jsonl_server._h_context({"task": "jwt", "session_id": "sess-1"})
+    result = jsonl_server._h_context({"task": "jwt", "session_id": "sess-1"})
+
+    salient = result["_meta"]["vouch_salience"]
+    assert "c0" not in {rec["top_claim_id"] for rec in salient}

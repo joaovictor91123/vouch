@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .metrics import DEFAULT_STALE_DAYS, compute
-from .models import ClaimStatus, ProposalStatus
+from .models import ClaimStatus, PageStatus, ProposalStatus
 from .page_filters import filter_pages
 from .storage import KBStore
 
@@ -184,6 +184,8 @@ def build(
         kind="followup",
         before={"due_at": now.date().isoformat()},
     )
+    # mirror recall/search: archived pages are out of the live set even when
+    # metadata still says followup_status=open and due_at is past.
     followup_rows = sorted(
         (
             FollowupRow(
@@ -194,7 +196,9 @@ def build(
                 followup_status=str(p.metadata.get("followup_status", "")),
             )
             for p in due_pages
-            if str(p.metadata.get("followup_status", "")) not in _CLOSED_FOLLOWUP_STATUSES
+            if p.status is not PageStatus.ARCHIVED
+            and str(p.metadata.get("followup_status", ""))
+            not in _CLOSED_FOLLOWUP_STATUSES
         ),
         key=lambda r: r.due_at,
     )[:limit]

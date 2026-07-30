@@ -3456,6 +3456,77 @@ def search(
             click.echo(f"{k}/{i}\t{snip}  ({used})")
 
 
+@cli.command("explain-ranking")
+@click.argument("query")
+@click.option("--limit", "-n", default=10, show_default=True, type=int)
+@click.option("--max-chars", default=None, type=int,
+              help="Also explain kb.context's budget gate at this character cap.")
+@click.option("--require-citations", is_flag=True,
+              help="Also explain the uncited-claim gate.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True)
+@click.option("--project", default=None, help="Viewer project for scope filtering.")
+@click.option("--agent", default=None, help="Viewer agent for scope filtering.")
+def explain_ranking_cmd(
+    query: str,
+    limit: int,
+    max_chars: int | None,
+    require_citations: bool,
+    fmt: str,
+    project: str | None,
+    agent: str | None,
+) -> None:
+    """Explain why each candidate for QUERY ranked where it did."""
+    from .explain_ranking import explain_ranking
+
+    store = _load_store()
+    with _cli_errors():
+        result = explain_ranking(
+            store,
+            query=query,
+            limit=limit,
+            max_chars=max_chars,
+            require_citations=require_citations,
+            project=project,
+            agent=agent,
+        )
+
+    if fmt == "json":
+        _emit_json(result)
+        return
+
+    retrieval = result["retrieval"]
+    stages = retrieval["stages"]
+    click.echo(
+        f"backend: {retrieval['used']} (configured {retrieval['configured']}, "
+        f"semantic {'available' if retrieval['semantic_available'] else 'unavailable'})"
+    )
+    active = [name for name in ("fusion", "recency", "pages_first", "rerank")
+              if stages.get(name)]
+    if stages.get("strategy"):
+        active.append(f"strategy={stages['strategy']}")
+    click.echo(f"stages active: {', '.join(active) if active else 'none'}")
+
+    for cand in result["candidates"]:
+        click.echo(
+            f"\n{cand['kind']}/{cand['id']}  gate={cand['gate']}"
+            f"  lexical={cand['lexical_rank']} semantic={cand['semantic_rank']}"
+            f"  rrf={cand['rrf_contribution']}"
+        )
+        for row in cand["stages"]:
+            # a stage that did not run is shown so the chain reads continuously,
+            # flagged rather than silently absent.
+            flag = "" if row["applied"] else " (off)"
+            drank = row["rank_delta"]
+            dscore = row["score_delta"]
+            moved = "" if not drank else f" rank{drank:+d}"
+            shifted = "" if not dscore else f" score{dscore:+.6f}"
+            click.echo(
+                f"    {row['stage']:<14} rank={row['rank']} "
+                f"score={row['score']:.6f}{moved}{shifted}{flag}"
+            )
+
+
 @cli.command()
 @click.argument("node_id")
 @click.option("--depth", default=1, show_default=True, type=int)

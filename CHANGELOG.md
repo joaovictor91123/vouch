@@ -6,7 +6,43 @@ All notable changes to vouch are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`kb.explain_ranking` — why a result ranked where it did** (#432): a
+  read-only breakdown of the retrieval pipeline. Per candidate it reports the
+  lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
+  stage — fusion, scope and status filters, recency, pages-first, rerank, the
+  pluggable strategy, the limit window, and the optional budget/citation gates
+  — with the rank and score delta that stage caused, plus the gate that kept or
+  dropped it (`kept` / `scope-filtered` / `status-filtered` / `limit-dropped` /
+  `budget-dropped` / `uncited`). Registered on MCP, JSONL and the CLI
+  (`vouch explain-ranking "<query>" [--format text|json]`). Viewer-scoped
+  through the same `filter_hits` as `kb.context`, so it cannot expose an
+  artifact the caller could not already retrieve, and it touches no write path.
+
 ### Fixed
+- **digest drops archived followup pages** (#625):
+  `followups_due` already skipped `done`/`dropped` metadata, but an
+  `ARCHIVED` page with `followup_status=open` and a past `due_at` still
+  appeared every morning — stale claims were filtered, pages were not.
+  mirror recall: archived followups leave the due list.
+- **`verify_all` / `doctor` treat missing externals like drift** (#622):
+  `vouch source verify` already marked `external_status=missing` as `!`,
+  but `verify_all`'s audit `failed` list and `health.doctor` only looked
+  for `drift`, so a deleted upstream file could leave doctor `ok: true`
+  while the CLI failed. missing now joins the failed set and emits a
+  `source_missing` warning.
+- **salience reflex excludes retracted claims**: `compute_salience` scanned
+  every claim regardless of status, so the `_meta.vouch_salience` sidebar
+  counted `ARCHIVED` / `SUPERSEDED` / `REDACTED` claims in `claim_count` and
+  could name one as an entity's `top_claim_id` — pointing agents at knowledge
+  the archive/supersede/redact controls were supposed to retire. the scan now
+  applies the same lifecycle filter as the scope filter beside it. an entity
+  whose only claims are retracted still appears, reporting zero live claims.
+- **config quoted `"false"` disables enrich / events / pages_first** (#620):
+  `#558` left three loaders on bare `bool()`, so a quoted `enabled: "false"`
+  left `capture.enrich` and `retrieval.events` on, and turned
+  `retrieval.pages_first` on. all three now use `coerce_bool` like the
+  other config loaders.
 - **vault sync mirrors post-approve WORKING/DRAFT artifacts** (#583):
   `kb_to_vault` now includes durable `WORKING` claims and `DRAFT` pages
   (the propose+approve defaults), so Obsidian mirrors fill without
@@ -39,6 +75,36 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
+- **core PRs can auto-merge, on two mechanical bars.** the blanket "core
+  is never armed" refusal is gone; both authorization surfaces (the
+  `auto-merge` label and the `/auto-merge` comment) now route through one
+  reusable `arm-auto-merge.yml`, which arms any klass only when the
+  `diff coverage` check is green on that head sha *and* the PR carries a
+  closing reference to an issue plind-junior opened. neither bar is
+  recomputed in the write-token job — both are read as metadata, so no PR
+  code executes there. the owner-only guard and deauthorize-on-push are
+  unchanged, and folding the two arming paths into one file removes the
+  drift that left `/auto-merge` with no coverage check at all.
+- **CodeRabbit's verdict no longer gates anything.** the
+  `coderabbit-approved` commit status, the 3-strike auto-close, and the
+  daily stale-pr reaper are removed, along with the `coderabbit-gate` and
+  `stale-check` pr_bot commands that computed them. the status had
+  already been dropped from the `test` ruleset's required checks, so this
+  removes the machinery that outlived it rather than lowering a live bar.
+  CodeRabbit still reviews every non-draft pr and still files formal
+  approve / request-changes reviews — they are advisory now. the merge
+  path is ci + CODEOWNERS, with the owner's auto-merge label as the go
+  signal.
+- **the `trust-gate` workflow is removed.** it failed a pr when an author
+  outside the OWNER association touched a core path — a bar that the
+  rewritten `arm-auto-merge.yml` already enforces from the other side:
+  nothing arms without the owner's own label, green `diff coverage`, and a
+  closing reference to an owner-opened issue, and CODEOWNERS still holds
+  the review requirement on core paths. the `trust` pr_bot command and its
+  `is_trusted` helper go with it. core-path classification stays — it is
+  what `arm-auto-merge.yml` reads. **remove `trust-gate` from the `test`
+  ruleset's required checks**, or every pr will block on a check that no
+  longer reports.
 - **auto approval is the default** (`review.approver_role: trusted-agent`
   in the starter config): a fresh KB approves the capturing agent's
   proposals with no human step. nothing bypasses the gate — every write

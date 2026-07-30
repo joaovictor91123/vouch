@@ -146,6 +146,9 @@ HOT_MEMORY_EXCLUDED: dict[str, str] = {
     "kb.neighbors": "graph slice — out of scope for recency sidebar",
     "kb.synthesize": "answer-mode prose — sidebar adds noise",
     "kb.diff": "field-level revision diff — self-contained, not a claim browse",
+    "kb.explain_ranking": (
+        "ranking diagnostic — a recency sidebar would perturb the output being inspected"
+    ),
     "kb.detect_themes": "cluster analysis — self-contained, not a claim browse",
     "kb.experts": "ranked entity analysis — self-contained, not a claim browse",
     "kb.triage_pending": (
