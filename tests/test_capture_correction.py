@@ -275,3 +275,171 @@ def test_capture_correction_registered_on_every_surface() -> None:
     from vouch.cli import cli
 
     assert "capture-correction" in cli.commands
+
+
+# --- the surfaces, exercised rather than merely registered -----------------
+
+
+def test_cli_capture_correction_files_a_proposal(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    result = CliRunner().invoke(
+        cli,
+        ["capture-correction", CORRECTION, "--session-id", "cli-1",
+         "--context", "the agent said release"],
+    )
+    assert result.exit_code == 0, result.output
+    report = _json.loads(result.output)
+    assert report["captured"] is True
+    pending = store.list_proposals(ProposalStatus.PENDING)
+    assert [p.kind for p in pending] == [ProposalKind.CLAIM]
+
+
+def test_mcp_capture_correction_files_a_proposal(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vouch import server
+
+    monkeypatch.chdir(store.root)
+    report = server.kb_capture_correction(prompt=CORRECTION, session_id="mcp-1")
+    assert report["captured"] is True
+    assert store.list_proposals(ProposalStatus.PENDING)
+
+
+# --- config coercion and the guards ----------------------------------------
+
+
+def test_overlap_is_zero_when_either_side_has_no_signal() -> None:
+    # all stopwords / too-short tokens on one side -> no shared signal to score
+    assert correction.overlap("we do it", "we deploy from main") == 0.0
+    assert correction.overlap("we deploy from main", "") == 0.0
+
+
+def test_config_falls_back_on_an_unreadable_or_odd_document(
+    store: KBStore
+) -> None:
+    store.config_path.write_text("capture: [unclosed\n", encoding="utf-8")
+    assert correction.load_config(store) == correction.CorrectionConfig()
+    store.config_path.write_text("just-a-string\n", encoding="utf-8")
+    assert correction.load_config(store) == correction.CorrectionConfig()
+    store.config_path.write_text("capture: not-a-mapping\n", encoding="utf-8")
+    assert correction.load_config(store) == correction.CorrectionConfig()
+    store.config_path.write_text(
+        "capture:\n  correction: not-a-mapping\n", encoding="utf-8"
+    )
+    assert correction.load_config(store) == correction.CorrectionConfig()
+
+
+def test_config_typos_coerce_to_defaults(store: KBStore) -> None:
+    # A config mistake must not take down an ambient capture path.
+    store.config_path.write_text(
+        "capture:\n  correction:\n"
+        "    max_per_session: many\n"
+        "    min_chars: lots\n"
+        "    dedup_threshold: highish\n",
+        encoding="utf-8",
+    )
+    cfg = correction.load_config(store)
+    assert cfg.max_per_session == correction.DEFAULT_MAX_PER_SESSION
+    assert cfg.min_chars == correction.DEFAULT_MIN_CHARS
+    assert cfg.dedup_threshold == correction.DEFAULT_DEDUP_THRESHOLD
+
+
+def test_a_correction_that_is_only_its_opener_is_not_knowledge(
+    store: KBStore
+) -> None:
+    # "no, actually" strips to nothing; "no, it is" strips below min_chars.
+    for prompt in ("no, actually", "no, wrong"):
+        report = correction.capture(store, prompt=prompt, session_id="s1", agent="a")
+        assert report["captured"] is False
+    assert store.list_proposals(ProposalStatus.PENDING) == []
+
+
+def test_pushback_without_an_assertion_is_not_knowledge() -> None:
+    # Disagreement with no claim in it — nothing here belongs in a KB.
+    assert correction.detect("no, that one over there instead please") is None
+
+
+def test_dedup_catches_an_already_approved_claim(store: KBStore) -> None:
+    from vouch.proposals import approve, propose_claim
+
+    src = store.put_source(b"we deploy from main not release")
+    pr = propose_claim(
+        store, text="we deploy from main not release", evidence=[src.id],
+        proposed_by="agent-a",
+    )
+    approve(store, pr.id, approved_by="human-b")
+    report = correction.capture(store, prompt=CORRECTION, session_id="s1")
+    assert report["captured"] is False
+    assert report["reason"] == "duplicate"
+
+
+def test_a_short_prompt_is_ignored_before_anything_else(store: KBStore) -> None:
+    assert correction.capture(store, prompt="no", session_id="s1", agent="a")[
+        "captured"
+    ] is False
+
+
+def test_dedup_catches_a_pending_correction_from_another_session(
+    store: KBStore
+) -> None:
+    first = correction.capture(store, prompt=CORRECTION, session_id="s1", agent="a")
+    assert first["captured"] is True
+    again = correction.capture(
+        store, prompt="no, we deploy from main not release branch",
+        session_id="s2", agent="a",
+    )
+    assert again["captured"] is False
+    assert again["reason"] == "duplicate"
+    assert len(store.list_proposals(ProposalStatus.PENDING)) == 1
+
+
+def test_dedup_folds_in_the_embedding_hits_when_the_extra_is_present(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The embedding path is additive on top of the lexical guard, and is
+    stubbed here so the branch is exercised with or without the extra
+    installed — a base install must still dedup, which is why the lexical
+    pass runs first and this one only adds."""
+    import sys
+    import types
+
+    module = types.ModuleType("vouch.embeddings.similarity")
+    module.find_similar_on_propose = lambda store, text: [  # type: ignore[attr-defined]
+        {"artifact_id": None},              # ignored: not a string
+        {"artifact_id": "semantic-twin"},
+    ]
+    monkeypatch.setitem(sys.modules, "vouch.embeddings.similarity", module)
+    report = correction.capture(
+        store, prompt="no, the release train leaves on thursdays now",
+        session_id="s3", agent="a",
+    )
+    assert report["captured"] is False
+    assert report["reason"] == "duplicate"
+    assert report["duplicate_of"] == "semantic-twin"
+
+
+def test_dedup_still_works_on_a_base_install(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the `[embeddings]` extra the import fails and the lexical guard
+    is all there is — which is the whole reason it runs first. Pinned, because
+    dedup that silently stops working is how an unattended capture floods a
+    review queue."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "vouch.embeddings.similarity", None)
+    assert correction.capture(
+        store, prompt=CORRECTION, session_id="s1"
+    )["captured"] is True
+    again = correction.capture(
+        store, prompt="no, we deploy from main not release", session_id="s2"
+    )
+    assert again["reason"] == "duplicate"
