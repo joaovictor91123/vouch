@@ -1,14 +1,17 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, Check, Eraser, LoaderCircle, Merge, X } from 'lucide-react'
 import { useState } from 'react'
+import { CitedText } from '../components/CitedText'
 import { EmptyState } from '../components/EmptyState'
 import { ErrorCard } from '../components/ErrorCard'
+import { IdChip } from '../components/IdChip'
 import { Markdown } from '../components/Markdown'
 import { useErrorToast, useToast } from '../components/Toast'
 import { useConnection } from '../connection/ConnectionContext'
 import type { ProjectState } from '../connection/ConnectionContext'
 import { useFanout } from '../lib/fanout'
 import { rpc, VouchRpcError } from '../lib/rpc'
+import { payloadIds, useOpenArtifact } from '../lib/useOpenArtifact'
 import type { Proposal, SessionEntry } from '../lib/types'
 
 function payloadPreview(p: Proposal): string {
@@ -113,6 +116,7 @@ export function PendingView() {
   // Derived: an optimistic cache removal hides the detail pane in flight;
   // a rollback (onError restoring the cache) brings it back, error card intact.
   const selected = rows.find((r) => rowKey(r) === selectedKey) ?? null
+  const openArtifact = useOpenArtifact(selected?.project ?? null)
   const canDecide =
     !!selected &&
     hasMethod('kb.approve', selected.project.conn.endpoint) &&
@@ -673,14 +677,21 @@ export function PendingView() {
                   <div key={k} className="border-b border-rule/60 py-2 text-sm last:border-b-0">
                     <dt className="mb-2 text-xs uppercase tracking-wide text-sepia">{k}</dt>
                     <dd className="min-w-0">
-                      <Markdown>{v}</Markdown>
+                      <Markdown onOpenId={openArtifact}>{v}</Markdown>
                     </dd>
                   </div>
                 ) : (
                   <div key={k} className="flex gap-3 border-b border-rule/60 py-2 text-sm last:border-b-0">
                     <dt className="w-28 shrink-0 text-xs uppercase tracking-wide text-sepia">{k}</dt>
                     <dd className="min-w-0 whitespace-pre-wrap break-words text-ink-2">
-                      {typeof v === 'string' ? v : JSON.stringify(v)}
+                      {payloadIds(k, v)?.map((id) => (
+                        <IdChip key={id} id={id} onOpen={openArtifact} />
+                      )) ??
+                        (typeof v === 'string' ? (
+                          <CitedText text={v} onOpenId={openArtifact} />
+                        ) : (
+                          JSON.stringify(v)
+                        ))}
                     </dd>
                   </div>
                 ),

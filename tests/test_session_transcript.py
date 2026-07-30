@@ -211,7 +211,7 @@ def test_handler_returns_degraded_when_absent(
         "id": "3", "method": "kb.session_transcript",
         "params": {"session_id": "11111111-1111-1111-1111-111111111111"},
     })
-    assert resp["ok"] is True
+    assert resp["ok"] is True, resp
     assert resp["result"]["available"] is False
 
 
@@ -221,6 +221,8 @@ _CODEX_LINES = [
     {"type": "session_meta", "payload": {
         "id": "cx-1", "cwd": "/repo", "timestamp": "2026-06-22T08:01:54Z",
         "git": {"branch": "feat/x"}}},
+    {"type": "turn_context", "payload": {
+        "turn_id": "t1", "cwd": "/repo", "model": "gpt-5-codex"}},
     {"type": "response_item", "payload": {
         "type": "message", "role": "developer",
         "content": [{"type": "input_text", "text": "<permissions>boilerplate"}]}},
@@ -253,6 +255,8 @@ def test_parse_codex_pairs_calls_and_skips_boilerplate(tmp_path: Path) -> None:
     assert out["session"]["agent"] == "codex"
     assert out["session"]["cwd"] == "/repo"
     assert out["session"]["git_branch"] == "feat/x"
+    # codex carries the model on turn_context, not session_meta
+    assert out["session"]["model"] == "gpt-5-codex"
 
     roles = [m["role"] for m in out["messages"]]
     assert roles == ["user", "assistant"]  # developer message skipped
