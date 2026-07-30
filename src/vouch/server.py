@@ -331,6 +331,9 @@ def kb_context(
     expand_graph: bool = False,
     graph_depth: int = 1,
     graph_limit: int = 20,
+    # restrict which relation types the graph walk follows, mirroring the jsonl
+    # _h_context handler and the kb_neighbors tool; None follows every type.
+    graph_rel_types: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a ContextPack ready to inject into an agent prompt.
 
@@ -347,6 +350,7 @@ def kb_context(
         min_items=min_items, require_citations=require_citations,
         project=project, agent=agent,
         expand_graph=expand_graph, graph_depth=graph_depth, graph_limit=graph_limit,
+        graph_rel_types=graph_rel_types,
     )
     result = salience_mod.attach_salience(result, store, session_id, cfg)
     pack_items = result.get("items") if isinstance(result, dict) else None
