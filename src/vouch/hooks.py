@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 from . import salience as salience_mod
+from .config_coerce import coerce_bool
 from .context import build_context_pack
 from .storage import KBStore
 
@@ -141,7 +142,7 @@ def short_circuit_cfg(cfg: dict) -> tuple[bool, float]:
     sc = retrieval.get("short_circuit") if isinstance(retrieval, dict) else None
     if not isinstance(sc, dict):
         return (False, _DEFAULT_MIN_CONFIDENCE)
-    enabled = bool(sc.get("enabled", False))
+    enabled = coerce_bool(sc.get("enabled", False), False)
     try:
         threshold = float(sc.get("min_confidence", _DEFAULT_MIN_CONFIDENCE))
     except (TypeError, ValueError):
@@ -162,7 +163,7 @@ def prompt_gate_cfg(cfg: dict) -> bool:
     gate = retrieval.get("prompt_gate") if isinstance(retrieval, dict) else None
     if not isinstance(gate, dict):
         return False
-    return bool(gate.get("enabled", False))
+    return coerce_bool(gate.get("enabled", False), False)
 
 
 def _confidence(score: float) -> float:
