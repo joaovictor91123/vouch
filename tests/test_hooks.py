@@ -153,6 +153,13 @@ def test_short_circuit_cfg_is_defensive() -> None:
     assert hooks.short_circuit_cfg(
         {"retrieval": {"short_circuit": {"enabled": True, "min_confidence": 7}}}
     ) == (True, 0.8)
+    # quoted YAML "false" must not enable (bool("false") is True)
+    assert hooks.short_circuit_cfg(
+        {"retrieval": {"short_circuit": {"enabled": "false"}}}
+    ) == default
+    assert hooks.short_circuit_cfg(
+        {"retrieval": {"short_circuit": {"enabled": "true"}}}
+    ) == (True, 0.8)
 
 
 def test_non_dict_json_payload_is_safe(store: KBStore) -> None:
@@ -490,3 +497,10 @@ def test_prompt_gate_cfg_is_defensive() -> None:
     assert hooks.prompt_gate_cfg({"retrieval": "nonsense"}) is False
     assert hooks.prompt_gate_cfg({"retrieval": {"prompt_gate": []}}) is False
     assert hooks.prompt_gate_cfg({"retrieval": {"prompt_gate": {}}}) is False
+    # quoted YAML "false" must stay off; "true" must enable
+    assert hooks.prompt_gate_cfg(
+        {"retrieval": {"prompt_gate": {"enabled": "false"}}}
+    ) is False
+    assert hooks.prompt_gate_cfg(
+        {"retrieval": {"prompt_gate": {"enabled": "true"}}}
+    ) is True
