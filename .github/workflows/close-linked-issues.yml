@@ -23,8 +23,19 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          # github's own parser ignores closing keywords inside code, so a pr
+          # that merely *discusses* "fixes #n" does not close #n. strip fenced
+          # blocks and inline code spans first to match that behaviour — pr
+          # #670 closed #652 off a `Fixes #652` quoted in its own prose.
+          strip_code() {
+            awk '
+              /^[[:space:]]*(```|~~~)/ { fenced = !fenced; next }
+              !fenced { print }
+            ' | sed 's/`[^`]*`//g'
+          }
           # same keyword set github itself honours, same-repo `#n` refs only.
           nums=$(printf '%s\n%s\n' "$TITLE" "$BODY" \
+            | strip_code \
             | grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]*#[0-9]+' \
             | grep -oE '[0-9]+' \
             | sort -un || true)
