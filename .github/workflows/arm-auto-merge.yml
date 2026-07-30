@@ -81,6 +81,9 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr }}
         run: |
+          # SC2016: the query is single-quoted on purpose — $owner/$name/$pr are
+          # graphql variables bound by -f/-F, not shell expansions.
+          # shellcheck disable=SC2016
           owners=$(gh api graphql \
             -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="$PR" \
             -f query='query($owner:String!,$name:String!,$pr:Int!){
