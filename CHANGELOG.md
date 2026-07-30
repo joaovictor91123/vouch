@@ -82,8 +82,18 @@ All notable changes to vouch are documented here. Format follows
   removes the machinery that outlived it rather than lowering a live bar.
   CodeRabbit still reviews every non-draft pr and still files formal
   approve / request-changes reviews — they are advisory now. the merge
-  path is ci + trust-gate + CODEOWNERS, with the owner's auto-merge label
-  as the go signal.
+  path is ci + CODEOWNERS, with the owner's auto-merge label as the go
+  signal.
+- **the `trust-gate` workflow is removed.** it failed a pr when an author
+  outside the OWNER association touched a core path — a bar that the
+  rewritten `arm-auto-merge.yml` already enforces from the other side:
+  nothing arms without the owner's own label, green `diff coverage`, and a
+  closing reference to an owner-opened issue, and CODEOWNERS still holds
+  the review requirement on core paths. the `trust` pr_bot command and its
+  `is_trusted` helper go with it. core-path classification stays — it is
+  what `arm-auto-merge.yml` reads. **remove `trust-gate` from the `test`
+  ruleset's required checks**, or every pr will block on a check that no
+  longer reports.
 - **auto approval is the default** (`review.approver_role: trusted-agent`
   in the starter config): a fresh KB approves the capturing agent's
   proposals with no human step. nothing bypasses the gate — every write
