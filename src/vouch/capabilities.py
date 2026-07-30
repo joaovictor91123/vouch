@@ -35,6 +35,7 @@ METHODS = [
     "kb.activity",
     "kb.digest",
     "kb.search",
+    "kb.explain_ranking",
     "kb.neighbors",
     "kb.experts",
     "kb.context",
