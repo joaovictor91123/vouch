@@ -242,3 +242,133 @@ def test_cli_bench_run_against_requires_strategy(tmp_path: Path) -> None:
     result = CliRunner().invoke(cli, ["bench", "run", "--against", str(champion)])
     assert result.exit_code != 0
     assert "--against requires --strategy" in result.output
+
+
+# --- derivation categories (#617) -----------------------------------------
+
+_DERIVATION_CATEGORIES = (
+    "passive-consolidation",
+    "multi-hop-relational",
+    "temporal-depth",
+    "aggregation",
+)
+
+
+def test_categories_include_derivation_axes() -> None:
+    for name in _DERIVATION_CATEGORIES:
+        assert name in CATEGORIES
+
+
+def test_derivation_cases_state_no_answer_only_parts() -> None:
+    """The graded fact must be derivable and never stated.
+
+    Each derivation case carries `required` parts instead of an `expected`
+    answer — if it carried an expected string the generator would have had to
+    write that string into a session, which is the degeneration into
+    single-session recall the category exists to avoid.
+    """
+    cases = [c for c in generate(11).cases if c.category in _DERIVATION_CATEGORIES]
+    assert len(cases) == len(_DERIVATION_CATEGORIES)
+    for case in cases:
+        assert case.expected is None, case.category
+        assert len(case.required) >= 3, case.category
+        assert len(set(case.required)) == len(case.required), case.category
+
+
+def test_derivation_parts_are_planted_in_separate_sessions() -> None:
+    """Every required part is in the corpus, and no session holds them all."""
+    dataset = generate(4)
+    bodies = [text for _title, text in dataset.sessions]
+    corpus = "\n".join(bodies)
+    for case in dataset.cases:
+        if case.category not in _DERIVATION_CATEGORIES:
+            continue
+        for part in case.required:
+            assert part in corpus, (case.category, part)
+        assert not any(
+            all(part in body for part in case.required) for body in bodies
+        ), f"{case.category} is answerable from one session"
+
+
+def test_derivation_answer_key_is_a_pure_function_of_the_seed() -> None:
+    for seed in (1, 9, 23):
+        first = [c for c in generate(seed).cases if c.required]
+        second = [c for c in generate(seed).cases if c.required]
+        assert first == second
+    assert [c.required for c in generate(1).cases if c.required] != [
+        c.required for c in generate(2).cases if c.required
+    ]
+
+
+def test_existing_categories_are_unchanged_by_derivation_cases() -> None:
+    """The ten original categories must generate identically.
+
+    The derivation block draws from a derived rng and its own pools precisely
+    so recorded per-category scores stay comparable across this change. If a
+    future edit advances the main rng before category 10, this fails.
+    """
+    original = [c for c in generate(1).cases if not c.required]
+    assert [c.category for c in original] == [
+        "single-session-recall",
+        "multi-session",
+        "knowledge-update",
+        "point-in-time",
+        "decoy-discrimination",
+        "injection-resistance",
+        "abstention",
+        "citation-correctness",
+        "receipt-coverage",
+        "supersede-hygiene",
+    ]
+    # pinned against the pre-#617 generator for seed 1 — these are the values
+    # the ten categories produced before the derivation block existed, so a
+    # change here means the main rng stream moved and recorded scores shifted
+    assert original[0].expected == "zedo-2"
+    assert original[2].expected == "tenare"
+    assert original[2].forbidden == ("babubo",)
+    assert original[4].expected == "410 requests per minute"
+    assert original[9].expected == "9:05"
+
+
+def test_grade_required_all_parts_present() -> None:
+    case = MemoryCase("aggregation", "list all", None, required=("alpha", "beta"))
+    assert grade_case(case, "alpha and beta both surfaced") == (1.0, None)
+
+
+def test_grade_required_reports_the_shortfall() -> None:
+    case = MemoryCase(
+        "passive-consolidation", "what is on it", None,
+        required=("alpha", "beta", "gamma"),
+    )
+    score, reason = grade_case(case, "only alpha here")
+    assert score == 0.0
+    assert reason is not None
+    assert "1/3 parts" in reason
+    assert "'beta'" in reason and "'gamma'" in reason
+
+
+def test_grade_required_is_case_insensitive() -> None:
+    case = MemoryCase("temporal-depth", "history", None, required=("Alpha", "BETA"))
+    assert grade_case(case, "alpha then beta") == (1.0, None)
+
+
+def test_forbidden_still_zeroes_a_derivation_case() -> None:
+    """The dump-guard outranks derivation: a leak zeroes before parts count."""
+    case = MemoryCase(
+        "aggregation", "list all", None,
+        forbidden=("leaked",), required=("alpha",),
+    )
+    score, reason = grade_case(case, "alpha and leaked")
+    assert score == 0.0
+    assert reason is not None
+    assert "forbidden" in reason
+
+
+def test_run_scores_every_derivation_category() -> None:
+    """The real pipeline produces a graded number for each new axis."""
+    report = run(1, sessions=4)
+    for name in _DERIVATION_CATEGORIES:
+        entry = report["categories"][name]
+        assert entry["n"] == 1
+        assert entry["mean"] is not None
+        assert 0.0 <= entry["mean"] <= 1.0
