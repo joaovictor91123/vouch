@@ -216,18 +216,41 @@ def summarize_tool(
 
 
 def observations_from_transcript(transcript_path: Path) -> list[dict[str, Any]]:
-    """Rebuild PostToolUse-shaped observations from a Claude Code transcript.
+    """Rebuild PostToolUse-shaped observations from a host transcript.
 
     Used when ``capture.realtime`` is off so SessionEnd finalize can still feed
     ``session_split.summarize``'s ``min_observations`` gate without the
-    per-tool buffer.
-    """
-    try:
-        from .transcript import parse_claude_transcript
+    per-tool buffer. Tries the Claude parser first, then Codex — same
+    host-neutral detection ``transcript.load_transcript`` uses when the
+    caller already has a path (#602 / #645 review).
 
-        parsed = parse_claude_transcript(transcript_path)
-    except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError):
-        return []
+    Bound: inherits each parser's ``max_messages=2000`` default, so very
+    long sessions may drop their oldest tool calls (the realtime buffer
+    had no such cap).
+    """
+    from .transcript import parse_claude_transcript, parse_codex_transcript
+
+    parsed: dict[str, Any] | None = None
+    for parse in (parse_claude_transcript, parse_codex_transcript):
+        try:
+            candidate = parse(transcript_path)
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError):
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        obs = _observations_from_parsed(candidate)
+        if obs:
+            return obs
+        # keep the first successful parse as a fallback (empty session)
+        if parsed is None:
+            parsed = candidate
+    return _observations_from_parsed(parsed) if parsed is not None else []
+
+
+def _observations_from_parsed(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn normalized transcript ``messages``/``blocks`` into buffer rows."""
+    from .codex_rollout import _observation_from_call
+
     out: list[dict[str, Any]] = []
     for msg in parsed.get("messages") or []:
         if not isinstance(msg, dict):
@@ -248,6 +271,21 @@ def observations_from_transcript(transcript_path: Path) -> list[dict[str, Any]]:
                 tip,
                 response,
             )
+            # Codex tool names (exec_command, apply_patch, …) are not in
+            # _OBSERVED_TOOLS; map them the same way codex_rollout ingest does.
+            if obs is None and name is not None:
+                # parse_codex_transcript wraps args as {"arguments": ...} /
+                # {"input": ...}; unwrap so _observation_from_call sees the
+                # same shape parse_rollout feeds it.
+                call_args: object = tip
+                if isinstance(tip, dict) and "arguments" in tip:
+                    call_args = tip.get("arguments")
+                obs = _observation_from_call(str(name), call_args)
+                if obs is not None and isinstance(response, str) and response:
+                    text = response.lower()
+                    if "error" in text or "failed" in text:
+                        short = str(obs.get("summary", "")).removeprefix("Ran: ")
+                        obs = {**obs, "summary": f"Command failed: {short}"}
             if obs is None:
                 continue
             record: dict[str, Any] = {

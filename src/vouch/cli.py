@@ -2956,10 +2956,10 @@ def capture_observe_cmd() -> None:
         if store is None:
             return
         cfg = capture_mod.load_config(store)
+        if not cfg.enabled:
+            return
         if not cfg.realtime:
             _emit_json({"skipped": "realtime-disabled"})
-            return
-        if not cfg.enabled:
             return
         tool_input = payload.get("tool_input")
         obs = capture_mod.summarize_tool(

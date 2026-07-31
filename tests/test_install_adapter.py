@@ -175,6 +175,73 @@ def test_settings_json_merges_into_existing(tmp_path: Path) -> None:
     assert ".claude/settings.json" not in result.written
 
 
+def test_settings_json_merge_prunes_retired_observe_hooks(tmp_path: Path) -> None:
+    """Re-installing must drop pre-realtime vouch PostToolUse/Stop hooks
+    while keeping the user's own hooks on those events (#645 review)."""
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "vouch capture observe || true",
+                        },
+                        {
+                            "type": "command",
+                            "command": "my-own-post-tool-hook",
+                        },
+                    ],
+                },
+            ],
+            "Stop": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "vouch capture answer || true",
+                        },
+                    ],
+                },
+            ],
+            "SessionEnd": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "my-own-session-end",
+                        },
+                    ],
+                },
+            ],
+        },
+    }))
+    result = install("claude-code", target=tmp_path, tier="T4")
+    merged = json.loads((settings_dir / "settings.json").read_text())
+
+    post = [
+        h["command"]
+        for g in merged["hooks"].get("PostToolUse", [])
+        for h in g["hooks"]
+    ]
+    assert "my-own-post-tool-hook" in post
+    assert not any("vouch capture observe" in c for c in post)
+    assert "Stop" not in merged["hooks"]  # only held the retired vouch hook
+    end = [
+        h["command"]
+        for g in merged["hooks"].get("SessionEnd", [])
+        for h in g["hooks"]
+    ]
+    assert "my-own-session-end" in end
+    assert any("capture finalize" in c for c in end)
+    assert ".claude/settings.json" in result.merged
+
+
 def test_settings_json_merge_is_idempotent(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))

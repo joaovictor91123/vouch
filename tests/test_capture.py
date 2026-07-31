@@ -633,6 +633,53 @@ def test_observations_from_transcript_rebuilds_tool_activity(tmp_path: Path) -> 
     assert any(o.get("cmd") == "pytest -q" for o in obs)
 
 
+def test_observations_from_transcript_rebuilds_codex_tool_activity(
+    tmp_path: Path,
+) -> None:
+    """Codex rollouts must rebuild observations too — hardcoding the Claude
+    parser left non-Claude hosts with an empty buffer and silent
+    below-min finalize (#645 review)."""
+    import json as _json
+
+    transcript = tmp_path / "rollout.jsonl"
+    rows = [
+        {"type": "session_meta", "payload": {
+            "id": "019eec6b-4a0c-7ad0-afd1-68973c902231",
+            "cwd": "/proj", "timestamp": "2026-06-22T08:01:54Z"}},
+        {"type": "turn_context", "payload": {
+            "turn_id": "t1", "cwd": "/proj", "model": "gpt-5-codex"}},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "run tests"}]}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command",
+            "arguments": '{"cmd": "pytest -q"}', "call_id": "call_1"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_1",
+            "output": "3 passed"}},
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Add File: /proj/a.py\n+hi\n",
+            "call_id": "call_2"}},
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "call_id": "call_2",
+            "output": "Success"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call", "name": "exec_command",
+            "arguments": '{"cmd": "ls src"}', "call_id": "call_3"}},
+        {"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call_3",
+            "output": "a.py\n"}},
+    ]
+    transcript.write_text(
+        "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8",
+    )
+    obs = cap.observations_from_transcript(transcript)
+    assert len(obs) >= 3
+    assert any(o["tool"] == "Bash" and "pytest" in o["summary"] for o in obs)
+    assert any(o["tool"] == "Edit" for o in obs)
+
+
 def test_observations_from_transcript_edge_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -640,19 +687,18 @@ def test_observations_from_transcript_edge_paths(
     # unreadable / missing path → empty (OSError path)
     assert cap.observations_from_transcript(tmp_path / "missing.jsonl") == []
 
-    # parse raises → empty
+    # both parsers raise → empty
     broken = tmp_path / "broken.jsonl"
     broken.write_text("{not json\n", encoding="utf-8")
 
-    def _boom(_path):
+    def _boom(_path, **_kwargs):
         raise ValueError("bad transcript")
 
-    monkeypatch.setattr(
-        "vouch.transcript.parse_claude_transcript", _boom,
-    )
+    monkeypatch.setattr("vouch.transcript.parse_claude_transcript", _boom)
+    monkeypatch.setattr("vouch.transcript.parse_codex_transcript", _boom)
     assert cap.observations_from_transcript(broken) == []
 
-    def _odd(_path):
+    def _odd(_path, **_kwargs):
         return {
             "messages": [
                 "skip-me",
@@ -668,8 +714,9 @@ def test_observations_from_transcript_edge_paths(
                             },
                         },
                         {
+                            # ignored by both summarize_tool and codex mapper
                             "type": "tool_use",
-                            "name": "NotARealTool",
+                            "name": "update_plan",
                             "input": {},
                             "result": {"content": "x"},
                         },
@@ -679,8 +726,10 @@ def test_observations_from_transcript_edge_paths(
             ],
         }
 
+    monkeypatch.setattr("vouch.transcript.parse_claude_transcript", _odd)
     monkeypatch.setattr(
-        "vouch.transcript.parse_claude_transcript", _odd,
+        "vouch.transcript.parse_codex_transcript",
+        lambda _p, **_k: {"messages": []},
     )
     obs = cap.observations_from_transcript(broken)
     assert len(obs) == 1
@@ -737,6 +786,34 @@ def test_observe_cli_silent_when_capture_disabled(
     assert result.exit_code == 0, result.output
     assert result.output.strip() == ""
     assert not cap.buffer_path(store, "s-off").exists()
+
+
+def test_observe_cli_silent_when_disabled_even_if_realtime_off(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enabled:false must stay silent even when realtime is also off —
+    otherwise a fully-disabled KB prints the skip JSON (#645 review)."""
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    store.config_path.write_text(
+        "capture:\n  enabled: false\n  realtime: false\n", encoding="utf-8",
+    )
+    payload = _json.dumps({
+        "session_id": "s-off-both",
+        "cwd": str(store.root),
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(store.root / "a.py")},
+        "tool_response": "ok",
+    })
+    result = CliRunner().invoke(cli, ["capture", "observe"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == ""
+    assert "realtime-disabled" not in result.output
 
 
 def test_observe_cli_noop_when_no_store(
