@@ -110,6 +110,15 @@ All notable changes to vouch are documented here. Format follows
   `render_wiki_cmd` passed every on-disk page into index/MOC, so retired
   titles kept wiki links after archive. the CLI now filters to the same
   live set as recall / digest / search.
+- **session-split ignores archived pages in TAKEN TOPICS / collisions** (#712):
+  prompts and `_file_drafts` treated every on-disk page as taken, so archiving
+  a session summary permanently blocked redraft under the same title. Both
+  now reuse `compile._live_pages` (same live set as compile post-#700).
+- **`kb.neighbors` drops archived pages** (#696):
+  `_neighbor_ok` already filtered retracted claims but accepted any
+  on-disk page, so archived titles still appeared in neighbors while
+  context-pack expansion dropped them via `_page_is_live`. pages now
+  use the same live check.
 - **`kb.neighbors` no longer leaks edges pointing at excluded nodes**
   (#716): `find_neighbors` appended an edge to the response before
   checking whether its other endpoint passed the same
