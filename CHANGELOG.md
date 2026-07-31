@@ -106,6 +106,10 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`vouch render-wiki` drops archived pages** (#695):
+  `render_wiki_cmd` passed every on-disk page into index/MOC, so retired
+  titles kept wiki links after archive. the CLI now filters to the same
+  live set as recall / digest / search.
 - **session-split ignores archived pages in TAKEN TOPICS / collisions** (#712):
   prompts and `_file_drafts` treated every on-disk page as taken, so archiving
   a session summary permanently blocked redraft under the same title. Both
