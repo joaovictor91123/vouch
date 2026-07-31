@@ -7,6 +7,23 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **pdf and audio sources — page and timestamp receipts** (#613): a spec, a
+  paper, a recorded call could not become citable material, because a receipt is
+  a byte span into a source's stored bytes and the bytes of a pdf or an mp3 do
+  not spell the sentence anyone wants to quote. `vouch source add spec.pdf` (or
+  `call.mp3`) now extracts the text layer / transcript, stores *that* as the
+  content-addressed artifact, and records a **coordinate map** alongside it, so
+  every existing path — ingest, the receipt gate, `kb.source_verify`, receipt
+  coverage — works on it unchanged while a verified receipt also resolves to
+  `p7` or `t=00:14:23` in the original. `vouch source locate <id> <quote>` prints
+  that coordinate; `--raw` registers the binary untouched. **No new hard
+  dependency**: pypdf is the optional `[pdf]` extra, imported lazily, and
+  transcription is a configured command (`sources.transcribe_cmd`, the
+  `compile.llm_cmd` pattern) so vouch never bundles a speech model. A scanned pdf
+  with no text layer fails loudly rather than registering an empty source — ocr
+  is out of scope. The original's sha256 is recorded, so `vouch source verify`
+  re-checks the pdf or the recording for drift instead of losing the link back to
+  it the way extracting by hand does.
 - **cascade delete — the referrers ride along in the proposal** (#600):
   `kb.propose_delete(..., cascade=true)` and `vouch propose-delete --cascade`.
   `referenced_by()` refuses a delete while anything still points at the target,
