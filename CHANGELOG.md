@@ -106,6 +106,17 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`extract` no longer fractures file paths/URLs into auto-approved
+  garbage claims** (#702): the sentence segmenter only skipped a `.` as a
+  boundary when it was flanked by digits on both sides (decimals/versions
+  like `6.8.3`) — every other non-whitespace-flanked period, e.g. in
+  `src/vouch/cli.py`, `cli.py:2550`, or `github.com`, still split the
+  sentence. `segment_source` has no coherence check afterward, only
+  length/letter-ratio filters, so the resulting shards (`"see the
+  changelog at github."`) got auto-approved via `propose_quoted_claim`'s
+  receipt gate as first-class claims. The lookaround is now
+  non-whitespace-flanked rather than digit-only, so a period only ends a
+  segment when followed by whitespace or end-of-string.
 - **vault sync no longer clobbers a second, distinct vault edit made while
   the first edit's proposal is still pending**: `_has_pending_page_proposal`
   dedup-checked pending proposals by page id alone, so re-running
