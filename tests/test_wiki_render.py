@@ -8,6 +8,7 @@ and a map-of-content ranked by how referenced a page is.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -215,6 +216,35 @@ def test_jsonl_backlinks_excludes_archived_pages(
     assert resp["result"]["outbound"] == []
     full = handle_request({"id": "b5", "method": "kb.backlinks", "params": {}})
     assert "gone" not in full["result"]["backlinks"]
+
+
+def test_mcp_surface_serves_backlinks(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vouch import server
+
+    _put(store, "alpha", "Alpha", "see [[Beta]] for more.")
+    _put(store, "beta", "Beta", "a leaf page.")
+    monkeypatch.setattr(server, "_store", lambda: store)
+
+    single = server.kb_backlinks("beta")
+    assert single["inbound"] == ["Alpha"]
+    assert single["outbound"] == []
+
+    full = server.kb_backlinks()
+    assert full["backlinks"] == {"beta": ["Alpha"]}
+
+    with pytest.raises(ValueError, match="not found"):
+        server.kb_backlinks("nope")
+
+
+def test_cli_backlinks_full_map(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(store.root)
+    _put(store, "alpha", "Alpha", "see [[Beta]] for more.")
+    _put(store, "beta", "Beta", "a leaf page.")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["backlinks"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["backlinks"] == {"beta": ["Alpha"]}
 
 
 def test_cli_backlinks_single_page(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
