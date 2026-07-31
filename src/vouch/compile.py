@@ -31,7 +31,7 @@ from . import audit as audit_mod
 from . import llm_draft
 from .config_coerce import coerce_bool
 from .context import _RETRACTED_CLAIM_STATUSES
-from .models import ProposalStatus
+from .models import Page, PageStatus, ProposalStatus
 from .proposals import ProposalError, _slugify, propose_page
 from .storage import ArtifactNotFoundError, KBStore
 
@@ -190,6 +190,19 @@ class CompileReport:
         }
 
 
+def _live_pages(store: KBStore) -> list[Page]:
+    """Pages the wiki still has, i.e. everything but the archived ones.
+
+    Archiving is how an operator retires a bad compile page. Counting an
+    archived page as taken makes that retirement one-way: the LLM is told not
+    to redraft a topic the wiki no longer carries, and a draft that reuses the
+    title is dropped as a duplicate of a page nobody can read. Claims already
+    get this treatment via `_RETRACTED_CLAIM_STATUSES`; this is the same live
+    set recall, digest, search and the wiki view use.
+    """
+    return [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED]
+
+
 def _pending_page_names(store: KBStore) -> set[str]:
     """Lowercased titles + ids of page proposals already awaiting review."""
     names: set[str] = set()
@@ -285,7 +298,7 @@ def build_prompt(
     ]
     if not claims:
         raise CompileError("nothing to compile: the KB has no live approved claims")
-    pages = store.list_pages()
+    pages = _live_pages(store)
     pending = _pending_page_names(store)
 
     lines = [
@@ -472,7 +485,7 @@ def compile_kb(
 
     report = CompileReport(drafts=drafts, dry_run=dry_run)
 
-    existing = store.list_pages()
+    existing = _live_pages(store)
     taken_names = {p.title.strip().lower() for p in existing}
     taken_names |= {p.id.strip().lower() for p in existing}
     taken_names |= _pending_page_names(store)
