@@ -64,7 +64,7 @@ from .capabilities import capabilities as build_caps
 from .context import build_context_pack
 from .lifecycle import LifecycleError
 from .logging_config import configure_logging
-from .models import Proposal, ProposalKind, ProposalStatus
+from .models import PageStatus, Proposal, ProposalKind, ProposalStatus
 from .onboarding import (
     DEFAULT_TEMPLATE,
     TEMPLATES,
@@ -2378,8 +2378,13 @@ def propose_relation_cmd(src: str, relation: str, target: str, confidence: float
 @click.argument("target_id")
 @click.option("--rationale", default=None)
 @click.option("--dry-run", is_flag=True, help="Validate without filing the proposal.")
+@click.option(
+    "--cascade", is_flag=True,
+    help="Include the referrer edits in the proposal instead of being refused.",
+)
 def propose_delete_cmd(
-    target_kind: str, target_id: str, rationale: str | None, dry_run: bool
+    target_kind: str, target_id: str, rationale: str | None, dry_run: bool,
+    cascade: bool,
 ) -> None:
     """File a review-gated request to hard-delete an artifact."""
     store = _load_store()
@@ -2390,6 +2395,7 @@ def propose_delete_cmd(
             target_id=target_id,
             rationale=rationale,
             dry_run=dry_run,
+            cascade=cascade,
             proposed_by=_whoami(),
         )
     click.echo(pr.id)
@@ -3473,7 +3479,9 @@ def render_wiki_cmd(out_dir: str | None) -> None:
     With --out, writes index.md and MOC.md there; otherwise prints the index.
     """
     store = _load_store()
-    pages = store.list_pages()
+    # same live set as recall / digest / search — archived pages stay on disk
+    # but are out of the wiki front door (#695).
+    pages = [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED]
     index = wiki_render_mod.render_index(pages)
     if out_dir is None:
         _echo(index)
