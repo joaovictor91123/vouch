@@ -106,6 +106,10 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **session-split ignores archived pages in TAKEN TOPICS / collisions** (#712):
+  prompts and `_file_drafts` treated every on-disk page as taken, so archiving
+  a session summary permanently blocked redraft under the same title. Both
+  now reuse `compile._live_pages` (same live set as compile post-#700).
 - **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
   (#543 reopened, root-caused): both functions' own docstrings promise to
   remove every embedding row for a reindex or a deleted artifact, but
