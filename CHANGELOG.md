@@ -106,6 +106,13 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
+  (#543 reopened, root-caused): both functions' own docstrings promise to
+  remove every embedding row for a reindex or a deleted artifact, but
+  neither ever touched the legacy `embeddings` table alongside
+  `embedding_index` — a leaked row permanently tripped `fsck`'s
+  `orphan_embedding` warning with no way to clear it via reindexing, and
+  grew `state.db` unbounded over a KB's lifetime.
 - **`recall`/`capture` no longer crash on malformed numeric config
   values** (#488 reopened, root-caused): both `load_config()` functions
   passed `max_chars`/`min_observations`/`dedup_window_seconds` straight
