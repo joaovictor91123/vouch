@@ -117,6 +117,45 @@ All notable changes to vouch are documented here. Format follows
   receipt gate as first-class claims. The lookaround is now
   non-whitespace-flanked rather than digit-only, so a period only ends a
   segment when followed by whitespace or end-of-string.
+- **vault sync no longer clobbers a second, distinct vault edit made while
+  the first edit's proposal is still pending**: `_has_pending_page_proposal`
+  dedup-checked pending proposals by page id alone, so re-running
+  `vault_to_kb` after a *different* edit to an already-pending page
+  silently skipped filing a new proposal instead of recognizing the edit
+  as distinct. The second edit was never captured in any proposal, and
+  the next backward sync pass then overwrote the vault mirror with the
+  KB's still-unapproved-first-edit content, discarding the second edit
+  with no trace and no error. Now keyed on the content-address (sha256)
+  of the whole edit rather than the page id alone, matching how sources
+  are already fingerprinted elsewhere, so a second distinct edit correctly
+  files its own proposal instead of being coalesced into the first.
+- **`kb.experts` no longer leaks out-of-scope claims into entity rankings**
+  (#714): `rank_experts` aggregated evidence density over every claim in
+  the KB with no viewer/scope filtering at all, unlike every sibling
+  claim-aggregating read surface (`context.py`, `graph.py`, `digest.py`,
+  `health.py`, `compile.py`, and `themes.detect_themes`, the closest
+  shape-wise sibling). A `project`- or `agent`-scoped claim the caller
+  cannot otherwise retrieve still inflated `claim_count`, `citation_count`,
+  and `score`, and could surface verbatim in `top_claim_ids` — handing the
+  caller a claim id it cannot fetch. `rank_experts` now takes an optional
+  `viewer` (defaulting to `scoping.viewer_from(...)`, matching
+  `detect_themes`) and filters through `scoping.is_visible` before a claim
+  can contribute anything, with the FTS candidate fetch run through
+  `scoping.scoped_fetch_limit` so a mostly-out-of-scope KB doesn't starve
+  the candidate pool before the filter runs.
+- **`vouch render-wiki` drops archived pages** (#695):
+  `render_wiki_cmd` passed every on-disk page into index/MOC, so retired
+  titles kept wiki links after archive. the CLI now filters to the same
+  live set as recall / digest / search.
+- **session-split ignores archived pages in TAKEN TOPICS / collisions** (#712):
+  prompts and `_file_drafts` treated every on-disk page as taken, so archiving
+  a session summary permanently blocked redraft under the same title. Both
+  now reuse `compile._live_pages` (same live set as compile post-#700).
+- **`kb.neighbors` drops archived pages** (#696):
+  `_neighbor_ok` already filtered retracted claims but accepted any
+  on-disk page, so archived titles still appeared in neighbors while
+  context-pack expansion dropped them via `_page_is_live`. pages now
+  use the same live check.
 - **`kb.neighbors` no longer leaks edges pointing at excluded nodes**
   (#716): `find_neighbors` appended an edge to the response before
   checking whether its other endpoint passed the same
@@ -157,6 +196,7 @@ All notable changes to vouch are documented here. Format follows
   now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
   `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
   pattern, so a future status addition defaults to active.
+)
 - **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
   `_list_decided` parsed every decided proposal strictly, so a single bad file
   aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
