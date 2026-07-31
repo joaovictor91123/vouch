@@ -3022,6 +3022,18 @@ def capture_observe_cmd() -> None:
         session_id = str(payload.get("session_id") or "")
         if not session_id:
             return
+        start, ok = _hook_start(payload)
+        if not ok:
+            return
+        store = _capture_store(start)
+        if store is None:
+            return
+        cfg = capture_mod.load_config(store)
+        if not cfg.enabled:
+            return
+        if not cfg.realtime:
+            _emit_json({"skipped": "realtime-disabled"})
+            return
         tool_input = payload.get("tool_input")
         obs = capture_mod.summarize_tool(
             payload.get("tool_name"),
@@ -3030,18 +3042,13 @@ def capture_observe_cmd() -> None:
         )
         if obs is None:
             return
-        start, ok = _hook_start(payload)
-        if not ok:
-            return
-        store = _capture_store(start)
-        if store is None:
-            return
         tool_use_id = payload.get("tool_use_id")
         capture_mod.observe(
             store, session_id,
             tool=obs["tool"], summary=obs["summary"],
             files=obs.get("files"), cmd=obs.get("cmd"),
             tool_use_id=str(tool_use_id) if tool_use_id else None,
+            config=cfg,
         )
     except Exception:
         # a capture failure must never break the user's tool call.
