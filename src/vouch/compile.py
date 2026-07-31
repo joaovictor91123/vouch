@@ -29,7 +29,7 @@ import yaml
 
 from . import audit as audit_mod
 from . import llm_draft
-from .config_coerce import coerce_bool
+from .config_coerce import coerce_bool, coerce_numeric
 from .context import _RETRACTED_CLAIM_STATUSES
 from .models import Page, PageStatus, ProposalStatus
 from .proposals import ProposalError, _slugify, propose_page
@@ -150,15 +150,6 @@ class CompileConfig:
     profile_entity: str | None = None
 
 
-def _coerce(value: Any, default: Any, cast: Any) -> Any:
-    # A config typo (max_pages: five) must degrade to the default, not take
-    # down every caller — the web queue reads this config on each render.
-    try:
-        return cast(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def load_config(store: KBStore) -> CompileConfig:
     """Read ``compile:`` from config.yaml; fall back to defaults."""
     try:
@@ -173,10 +164,10 @@ def load_config(store: KBStore) -> CompileConfig:
     cmd = raw.get("llm_cmd")
     return CompileConfig(
         llm_cmd=str(cmd) if cmd else None,
-        max_pages=_coerce(
+        max_pages=coerce_numeric(
             raw.get("max_pages", DEFAULT_MAX_PAGES), DEFAULT_MAX_PAGES, int,
         ),
-        timeout_seconds=_coerce(
+        timeout_seconds=coerce_numeric(
             raw.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             DEFAULT_TIMEOUT_SECONDS, float,
         ),

@@ -31,7 +31,7 @@ from typing import Any
 
 import yaml
 
-from .config_coerce import coerce_bool
+from .config_coerce import coerce_bool, coerce_numeric
 from .enrich import Enrichment
 from .models import ProposalStatus
 from .secrets import mask_secrets
@@ -75,9 +75,15 @@ def load_config(store: KBStore) -> CaptureConfig:
     return CaptureConfig(
         enabled=coerce_bool(raw.get("enabled", DEFAULT_ENABLED), DEFAULT_ENABLED),
         realtime=coerce_bool(raw.get("realtime", DEFAULT_REALTIME), DEFAULT_REALTIME),
-        min_observations=int(raw.get("min_observations", DEFAULT_MIN_OBSERVATIONS)),
-        dedup_window_seconds=float(
-            raw.get("dedup_window_seconds", DEFAULT_DEDUP_WINDOW_SECONDS)
+        min_observations=coerce_numeric(
+            raw.get("min_observations", DEFAULT_MIN_OBSERVATIONS),
+            DEFAULT_MIN_OBSERVATIONS,
+            int,
+        ),
+        dedup_window_seconds=coerce_numeric(
+            raw.get("dedup_window_seconds", DEFAULT_DEDUP_WINDOW_SECONDS),
+            DEFAULT_DEDUP_WINDOW_SECONDS,
+            float,
         ),
         answer_mode=answer_mode,
     )
