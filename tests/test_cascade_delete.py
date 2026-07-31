@@ -27,6 +27,7 @@ from vouch.models import (
 )
 from vouch.proposals import (
     ProposalError,
+    _apply_cascade,
     approve,
     cascade_plan,
     check_approvable,
@@ -300,6 +301,68 @@ def test_payload_keeps_the_plan_the_reviewer_saw(store: KBStore) -> None:
     assert stored.payload["cascade"] == [
         {"kind": "page", "id": "p1", "unlink_claims": ["c1"]}
     ]
+
+
+# --- the applier is idempotent under a stale plan ---------------------------
+#
+# approve() re-derives the plan, so these branches are not reachable through
+# the public path — they exist for the narrow race where a concurrent writer
+# changes a referrer between derivation and application, and for a crash-retry
+# of approve(). Exercised directly, because that is the only honest way to
+# reach them.
+
+
+def test_applier_skips_a_page_that_vanished(store: KBStore) -> None:
+    assert _apply_cascade(
+        store, [{"kind": "page", "id": "gone", "unlink_claims": ["c1"]}],
+        actor="reviewer",
+    ) == []
+
+
+def test_applier_skips_a_page_already_unlinked(store: KBStore) -> None:
+    store.put_page(Page(id="p1", title="P", body="x"))
+    assert _apply_cascade(
+        store, [{"kind": "page", "id": "p1", "unlink_claims": ["c1"]}],
+        actor="reviewer",
+    ) == []
+    assert "page.cascade_unlink" not in _events(store)
+
+
+def test_applier_skips_a_claim_that_vanished(store: KBStore) -> None:
+    assert _apply_cascade(
+        store, [{"kind": "claim", "id": "gone", "unlink_supersedes": ["c1"]}],
+        actor="reviewer",
+    ) == []
+
+
+def test_applier_skips_a_claim_already_unlinked(store: KBStore) -> None:
+    _claim(store, "c2")
+    assert _apply_cascade(
+        store, [{"kind": "claim", "id": "c2", "unlink_supersedes": ["c1"]}],
+        actor="reviewer",
+    ) == []
+    assert "claim.cascade_unlink" not in _events(store)
+
+
+def test_applier_skips_a_relation_that_vanished(store: KBStore) -> None:
+    assert _apply_cascade(
+        store, [{"kind": "relation", "id": "gone", "action": "delete"}],
+        actor="reviewer",
+    ) == []
+
+
+def test_applier_ignores_a_malformed_step(store: KBStore) -> None:
+    assert _apply_cascade(store, ["not-a-dict"], actor="reviewer") == []  # type: ignore[list-item]
+
+
+def test_applier_ignores_a_step_without_an_id(store: KBStore) -> None:
+    assert _apply_cascade(store, [{"kind": "page"}], actor="reviewer") == []
+
+
+def test_applier_ignores_an_unknown_step_kind(store: KBStore) -> None:
+    assert _apply_cascade(
+        store, [{"kind": "source", "id": "s1"}], actor="reviewer"
+    ) == []
 
 
 # --- the gate --------------------------------------------------------------
