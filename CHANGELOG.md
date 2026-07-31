@@ -27,6 +27,17 @@ All notable changes to vouch are documented here. Format follows
   `capture.correction.enabled` (default true) gates it; declines report
   `{"captured": false, "reason": ...}` rather than failing silently.
   `vouch capture-correction`, plus MCP and JSONL.
+- **operator profile page** (#614): `vouch compile --profile` drafts a single
+  "how this operator works" page from approved claims and files it PENDING like
+  any other page. Selection is **opt-in, never inferred** — a claim qualifies by
+  carrying a `compile.profile_tags` tag (default `preference`, `convention`,
+  `decision`, `correction`) or by naming `compile.profile_entity`, not by
+  looking like a first-person sentence. The prompt forbids personality, trait
+  and psychometric inference outright, and every substantive sentence must cite
+  a claim or it is dropped, so the page can only ever restate what was already
+  approved. A draft citing anything outside the selected set is refused. A
+  refresh re-proposes rather than rewriting, so the history of what the system
+  believed about you stays auditable instead of being silently mutated.
 - **agent registry — who can write, and what each agent did** (#607):
   `vouch agents list / show / pause / resume / revoke`, keyed on the
   `auth_subject` hash `trust.py` already derives, so the committed
@@ -95,6 +106,16 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.confirm`-ing a claim no longer drops it from the hot-memory
+  sidebar** (#520 reopened, root-caused): `_is_active` listed only
+  `WORKING`/`STABLE`/`CONTESTED` as live statuses, omitting `ACTIONABLE`
+  — the status `lifecycle.confirm()`'s first confirmation moves a
+  `WORKING` claim to. A claim disappeared from `_meta.vouch_hot_memory`
+  the moment it was confirmed, and a fresh KB's onboarding seed claim
+  (filed `ACTIONABLE` from birth) never appeared at all. `_is_active` is
+  now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
+  `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
+  pattern, so a future status addition defaults to active.
 - **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
   `_list_decided` parsed every decided proposal strictly, so a single bad file
   aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —

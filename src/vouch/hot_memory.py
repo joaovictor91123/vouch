@@ -247,8 +247,21 @@ def _preview(text: str) -> str:
     return flat[: TEXT_PREVIEW_CHARS - 1] + "…"
 
 
+_RETIRED_CLAIM_STATUSES = frozenset({
+    ClaimStatus.SUPERSEDED,
+    ClaimStatus.ARCHIVED,
+    ClaimStatus.REDACTED,
+})
+
+
 def _is_active(status: ClaimStatus) -> bool:
-    return status in {ClaimStatus.WORKING, ClaimStatus.STABLE, ClaimStatus.CONTESTED}
+    # ACTIONABLE is a live post-approve state (lifecycle.confirm()'s first
+    # confirmation moves WORKING -> ACTIONABLE) — a literal WORKING/STABLE/
+    # CONTESTED set silently drops a claim from the sidebar the moment it's
+    # confirmed. Defined as the complement of the retired statuses so a
+    # future ClaimStatus addition defaults to active, matching
+    # context.py's _RETRACTED_CLAIM_STATUSES pattern.
+    return status not in _RETIRED_CLAIM_STATUSES
 
 
 def query_bias_for_page(page: Page) -> str:

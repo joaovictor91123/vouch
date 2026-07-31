@@ -3342,9 +3342,11 @@ def recall_cmd() -> None:
               help="Cap drafted pages (default: compile.max_pages, 5).")
 @click.option("--llm-cmd", default=None,
               help="Override compile.llm_cmd from config.yaml for this run.")
+@click.option("--profile", "profile", is_flag=True,
+              help="Compile the operator-profile page instead of topic pages.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
 def compile_cmd(dry_run: bool, max_pages: int | None,
-                llm_cmd: str | None, as_json: bool) -> None:
+                llm_cmd: str | None, profile: bool, as_json: bool) -> None:
     """Compile approved claims into topic-page proposals (llm-wiki ingest).
 
     Runs the deployment-configured LLM (compile.llm_cmd) over the live
@@ -3355,10 +3357,17 @@ def compile_cmd(dry_run: bool, max_pages: int | None,
     store = _load_store()
     actor = os.environ.get("VOUCH_AGENT") or compile_mod.COMPILE_ACTOR
     try:
-        report = compile_mod.compile_kb(
-            store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
-            max_pages=max_pages, dry_run=dry_run,
-        )
+        if profile:
+            # A different page, a different claim set, the same review gate.
+            report = compile_mod.compile_profile(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                dry_run=dry_run,
+            )
+        else:
+            report = compile_mod.compile_kb(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                max_pages=max_pages, dry_run=dry_run,
+            )
     except compile_mod.CompileError as e:
         raise click.ClickException(str(e)) from e
     if as_json:
