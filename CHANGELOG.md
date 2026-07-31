@@ -7,6 +7,28 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **cascade delete — the referrers ride along in the proposal** (#600):
+  `kb.propose_delete(..., cascade=true)` and `vouch propose-delete --cascade`.
+  `referenced_by()` refuses a delete while anything still points at the target,
+  which is correct but leaves most of a compiled kb undeletable — pages cite
+  claims in bulk, and a supersede pair is *mutually* locked (`b` lists `a` in
+  `supersedes`, `a`'s `superseded_by` points back at `b`), so neither end of a
+  chain could ever be removed by any delete ordering. The gate is unchanged;
+  what changes is what the reviewer is asked to approve. With `cascade`, the
+  required referrer edits are recorded in the payload as a plan, and
+  `_approve_delete` **re-derives** that plan at approve time — the same posture
+  as the existing ref re-check — applies it, and only then deletes, so the
+  approve-time `referenced_by` gate still has to come back empty. Pages and
+  claims lose their pointer (frontmatter *and* the inline `[claim: …]` body
+  markers, via the same `strip_claim_markers` helper `wipe_dead_refs` uses);
+  relations are deleted outright, because an edge whose endpoint is gone has no
+  meaning, and relations carry no inbound refs of their own, so the walk is one
+  level deep by construction with no transitive cascade to bound. Every edit
+  lands its own irreversible audit event (`page.cascade_unlink`,
+  `claim.cascade_unlink`, `relation.delete`) and the `{kind}.delete` event names
+  what it touched. Additive and default-off: `cascade` omitted reproduces
+  today's behaviour exactly, and the refusal message now names the flag so the
+  dead end is discoverable.
 - **correction capture — the pushback becomes a proposal** (#430): the adapter
   captured tool *outcomes* passively but never the single highest-signal event
   in a session, the user correcting the agent ("no, we deploy from `main` not

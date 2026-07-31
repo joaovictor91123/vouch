@@ -2376,8 +2376,13 @@ def propose_relation_cmd(src: str, relation: str, target: str, confidence: float
 @click.argument("target_id")
 @click.option("--rationale", default=None)
 @click.option("--dry-run", is_flag=True, help="Validate without filing the proposal.")
+@click.option(
+    "--cascade", is_flag=True,
+    help="Include the referrer edits in the proposal instead of being refused.",
+)
 def propose_delete_cmd(
-    target_kind: str, target_id: str, rationale: str | None, dry_run: bool
+    target_kind: str, target_id: str, rationale: str | None, dry_run: bool,
+    cascade: bool,
 ) -> None:
     """File a review-gated request to hard-delete an artifact."""
     store = _load_store()
@@ -2388,6 +2393,7 @@ def propose_delete_cmd(
             target_id=target_id,
             rationale=rationale,
             dry_run=dry_run,
+            cascade=cascade,
             proposed_by=_whoami(),
         )
     click.echo(pr.id)
