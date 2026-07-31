@@ -7,6 +7,36 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **agent registry — who can write, and what each agent did** (#607):
+  `vouch agents list / show / pause / resume / revoke`, keyed on the
+  `auth_subject` hash `trust.py` already derives, so the committed
+  `.vouch/agents.yaml` holds names, status, scopes and claim dates while the
+  credential itself stays in local config. Pause and revoke are enforced at one
+  chokepoint (`trust.authorized_bearer_token`), so MCP-over-HTTP and
+  JSONL-over-HTTP inherit revocation without two implementations, and a denied
+  token is indistinguishable from a wrong one. Revocation is terminal by
+  design. `vouch agents show` replays every audit event an agent produced
+  alongside the control-plane transitions applied to it — the per-action
+  attribution ditto's own docs stop short of. Existing deployments are
+  unaffected: an unregistered token still authenticates as an unnamed active
+  agent, and a corrupted status fails closed rather than reading as active.
+- **first-class goals — review-gated in-flight objectives** (#427): vouch could
+  record everything a project *knows* and nothing about what it is *doing*, so
+  an agent re-orienting after a compaction recovered facts and decisions but
+  not intent ("mid-migration to typed config", "release blocked on the
+  audit-race fix") — that lived as prose in a session summary, unqueryable.
+  Adds a `Goal` artifact with a `GoalStatus` of `open` / `done` / `abandoned` /
+  `blocked`, taking the same route as every other write: `kb.propose_goal`
+  files a pending proposal, a human approves it, and the goal lands as diffable
+  yaml under `.vouch/goals/`. Approval is pinned to `open` — a proposal cannot
+  land a goal that is already `done`, which would put a transition on disk that
+  never passed the lifecycle path. Every later move goes through
+  `lifecycle.set_goal_status`, the single write path, which appends a
+  `goal.status` event to `audit.log.jsonl` and a row to the goal's own
+  append-only `history`. Open goals resurface oldest-first in `vouch digest`
+  and in the SessionStart recall digest, so a returning operator or a fresh
+  agent session sees what is in flight before it picks something up.
+  `vouch propose-goal`, `vouch goals`, `vouch goal-status`, plus MCP and JSONL.
 - **explicit pins — a working set that always enters the pack** (#615):
   `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
   pages lead every context pack instead of having to win the query each turn,
@@ -55,6 +85,20 @@ All notable changes to vouch are documented here. Format follows
   now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
   `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
   pattern, so a future status addition defaults to active.
+- **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
+  `_list_decided` parsed every decided proposal strictly, so a single bad file
+  aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
+  same resilience as `list_proposals` / `list_pages`.
+- **rerank / recency / triage quoted `"true"` stays off** (#658):
+  `retrieval.rerank.enabled`, `retrieval.recency.enabled` and
+  `triage.enabled` were the last three readers still on the
+  isinstance/`bool()` pattern, so a quoted `enabled: "true"` fell through to
+  `False` while the sibling values (`top_k`, `half_life_days`) parsed fine
+  and the block looked configured. all three now go through `coerce_bool`,
+  finishing the migration `#620` started for `pages_first` in the same file
+  and `#648` continued for themes / reflex. note the fail direction is the
+  opposite of `#648`'s: there a quoted `"false"` left a feature on, here a
+  quoted `"true"` left it off.
 - **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
   flattened `resp.headers` (case-insensitive by design) into a plain
   `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
