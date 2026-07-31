@@ -34,6 +34,7 @@ from . import chatgpt_import as chatgpt_import_mod
 from . import codex_rollout as codex_rollout_mod
 from . import compile as compile_mod
 from . import contradictions as contradictions_mod
+from . import correction as correction_mod
 from . import digest as digest_mod
 from . import fetch as fetch_mod
 from . import goals as goals_mod
@@ -2572,6 +2573,26 @@ def notify_test(url: str, secret: str | None) -> None:
         sys.exit(1)
 
 
+# --- correction capture ---------------------------------------------------
+
+
+@cli.command(name="capture-correction")
+@click.argument("prompt")
+@click.option("--session-id", default=None)
+@click.option("--context", default=None, help="what the agent had just done")
+def capture_correction_cmd(
+    prompt: str, session_id: str | None, context: str | None
+) -> None:
+    """File a user correction as a pending claim proposal, if it is one."""
+    store = _load_store()
+    with _cli_errors():
+        report = correction_mod.capture(
+            store, prompt=prompt, session_id=session_id,
+            agent=_whoami(), context=context,
+        )
+    click.echo(json.dumps(report, indent=2))
+
+
 # --- goals ----------------------------------------------------------------
 
 
@@ -3022,6 +3043,18 @@ def capture_observe_cmd() -> None:
         session_id = str(payload.get("session_id") or "")
         if not session_id:
             return
+        start, ok = _hook_start(payload)
+        if not ok:
+            return
+        store = _capture_store(start)
+        if store is None:
+            return
+        cfg = capture_mod.load_config(store)
+        if not cfg.enabled:
+            return
+        if not cfg.realtime:
+            _emit_json({"skipped": "realtime-disabled"})
+            return
         tool_input = payload.get("tool_input")
         obs = capture_mod.summarize_tool(
             payload.get("tool_name"),
@@ -3030,18 +3063,13 @@ def capture_observe_cmd() -> None:
         )
         if obs is None:
             return
-        start, ok = _hook_start(payload)
-        if not ok:
-            return
-        store = _capture_store(start)
-        if store is None:
-            return
         tool_use_id = payload.get("tool_use_id")
         capture_mod.observe(
             store, session_id,
             tool=obs["tool"], summary=obs["summary"],
             files=obs.get("files"), cmd=obs.get("cmd"),
             tool_use_id=str(tool_use_id) if tool_use_id else None,
+            config=cfg,
         )
     except Exception:
         # a capture failure must never break the user's tool call.
@@ -3321,9 +3349,11 @@ def recall_cmd() -> None:
               help="Cap drafted pages (default: compile.max_pages, 5).")
 @click.option("--llm-cmd", default=None,
               help="Override compile.llm_cmd from config.yaml for this run.")
+@click.option("--profile", "profile", is_flag=True,
+              help="Compile the operator-profile page instead of topic pages.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
 def compile_cmd(dry_run: bool, max_pages: int | None,
-                llm_cmd: str | None, as_json: bool) -> None:
+                llm_cmd: str | None, profile: bool, as_json: bool) -> None:
     """Compile approved claims into topic-page proposals (llm-wiki ingest).
 
     Runs the deployment-configured LLM (compile.llm_cmd) over the live
@@ -3334,10 +3364,17 @@ def compile_cmd(dry_run: bool, max_pages: int | None,
     store = _load_store()
     actor = os.environ.get("VOUCH_AGENT") or compile_mod.COMPILE_ACTOR
     try:
-        report = compile_mod.compile_kb(
-            store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
-            max_pages=max_pages, dry_run=dry_run,
-        )
+        if profile:
+            # A different page, a different claim set, the same review gate.
+            report = compile_mod.compile_profile(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                dry_run=dry_run,
+            )
+        else:
+            report = compile_mod.compile_kb(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                max_pages=max_pages, dry_run=dry_run,
+            )
     except compile_mod.CompileError as e:
         raise click.ClickException(str(e)) from e
     if as_json:

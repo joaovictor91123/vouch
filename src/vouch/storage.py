@@ -97,6 +97,10 @@ def _starter_config() -> dict[str, Any]:
         "capture": {
             # auto-capture agent sessions into pending summaries.
             "enabled": True,
+            # per-tool PostToolUse buffer; off by default — SessionEnd rebuilds
+            # observations from the transcript (#602). set true to restore the
+            # crash-resistant realtime harvest (and wire PostToolUse yourself).
+            "realtime": False,
             "min_observations": 3,
             # answer memory: "session" extracts claims once at SessionEnd from
             # the full transcript; "turn" files claims on every Stop hook.
