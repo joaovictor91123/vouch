@@ -106,6 +106,18 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.neighbors` no longer leaks edges pointing at excluded nodes**
+  (#716): `find_neighbors` appended an edge to the response before
+  checking whether its other endpoint passed the same
+  retrievability/existence gate that decides node inclusion
+  (`_neighbor_ok` / `_node_kind`). superseded, archived, and redacted
+  claims — and missing nodes — were correctly excluded from `nodes`, but
+  the edge pointing at them still went out, so a response could contain
+  an edge whose `target` referenced an id the response itself said didn't
+  exist. `kb.neighbors` shares this code path across all three surfaces
+  (MCP, JSONL, CLI), so the leak was identical everywhere. an edge is now
+  only recorded once its other endpoint has been accepted into the
+  visited set — either already, or just now by passing the same gate.
 - **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
   (#543 reopened, root-caused): both functions' own docstrings promise to
   remove every embedding row for a reindex or a deleted artifact, but
