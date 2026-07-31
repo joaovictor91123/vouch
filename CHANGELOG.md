@@ -7,6 +7,23 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **first-class goals — review-gated in-flight objectives** (#427): vouch could
+  record everything a project *knows* and nothing about what it is *doing*, so
+  an agent re-orienting after a compaction recovered facts and decisions but
+  not intent ("mid-migration to typed config", "release blocked on the
+  audit-race fix") — that lived as prose in a session summary, unqueryable.
+  Adds a `Goal` artifact with a `GoalStatus` of `open` / `done` / `abandoned` /
+  `blocked`, taking the same route as every other write: `kb.propose_goal`
+  files a pending proposal, a human approves it, and the goal lands as diffable
+  yaml under `.vouch/goals/`. Approval is pinned to `open` — a proposal cannot
+  land a goal that is already `done`, which would put a transition on disk that
+  never passed the lifecycle path. Every later move goes through
+  `lifecycle.set_goal_status`, the single write path, which appends a
+  `goal.status` event to `audit.log.jsonl` and a row to the goal's own
+  append-only `history`. Open goals resurface oldest-first in `vouch digest`
+  and in the SessionStart recall digest, so a returning operator or a fresh
+  agent session sees what is in flight before it picks something up.
+  `vouch propose-goal`, `vouch goals`, `vouch goal-status`, plus MCP and JSONL.
 - **explicit pins — a working set that always enters the pack** (#615):
   `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
   pages lead every context pack instead of having to win the query each turn,
