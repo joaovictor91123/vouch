@@ -98,6 +98,21 @@ def test_find_neighbors_excludes_superseded_claims(store: KBStore) -> None:
     assert result["edges"] == []
 
 
+def test_find_neighbors_excludes_edge_to_missing_neighbor(store: KBStore) -> None:
+    """A relation left dangling after its target artifact was deleted (no
+    cascade delete) must not leak as an edge either - the same exclusion
+    `_node_kind`'s ArtifactNotFoundError already applies to `nodes`."""
+    store.put_entity(Entity(id="a", name="A", type=EntityType.CONCEPT))
+    store.put_entity(Entity(id="b", name="B", type=EntityType.CONCEPT))
+    store.put_relation(Relation(
+        id="a-b", source="a", relation=RelationType.USES, target="b",
+    ))
+    store._entity_path("b").unlink()
+    result = graph.find_neighbors(store, "a", depth=1)
+    assert result["nodes"] == []
+    assert result["edges"] == []
+
+
 def test_find_neighbors_unknown_node_raises(store: KBStore) -> None:
     with pytest.raises(ArtifactNotFoundError):
         graph.find_neighbors(store, "missing", depth=1)
