@@ -27,24 +27,30 @@ import yaml
 
 from . import __version__, bundle, health, hub_client, volunteer_context
 from . import adopt as adopt_mod
+from . import agents as agents_mod
 from . import audit as audit_mod
 from . import capture as capture_mod
 from . import chatgpt_import as chatgpt_import_mod
 from . import codex_rollout as codex_rollout_mod
 from . import compile as compile_mod
 from . import contradictions as contradictions_mod
+from . import correction as correction_mod
 from . import digest as digest_mod
 from . import fetch as fetch_mod
+from . import goals as goals_mod
 from . import hub as hub_mod
 from . import inbox as inbox_mod
 from . import install_adapter as install_mod
 from . import lifecycle as life
+from . import media as media_mod
 from . import metrics as metrics_mod
 from . import migrations as migrations_mod
 from . import notify as notify_mod
+from . import pins as pins_mod
 from . import pr_cache as prc_mod
 from . import provenance as prov_mod
 from . import recall as recall_mod
+from . import receipts as receipts_mod
 from . import sessions as sess_mod
 from . import skills as skills_mod
 from . import stats as stats_mod
@@ -58,7 +64,7 @@ from .capabilities import capabilities as build_caps
 from .context import build_context_pack
 from .lifecycle import LifecycleError
 from .logging_config import configure_logging
-from .models import Proposal, ProposalKind, ProposalStatus
+from .models import PageStatus, Proposal, ProposalKind, ProposalStatus
 from .onboarding import (
     DEFAULT_TEMPLATE,
     TEMPLATES,
@@ -79,6 +85,7 @@ from .proposals import (
     propose_claim,
     propose_delete,
     propose_entity,
+    propose_goal,
     propose_page,
     propose_relation,
     reject_auto_extracted,
@@ -115,6 +122,8 @@ def _cli_errors() -> Iterator[None]:
         migrations_mod.MigrationError,
         chatgpt_import_mod.ChatGPTImportError,
         codex_rollout_mod.CodexRolloutError,
+        agents_mod.AgentError,
+        pins_mod.PinError,
     ) as e:
         raise click.ClickException(str(e)) from e
 
@@ -2369,8 +2378,13 @@ def propose_relation_cmd(src: str, relation: str, target: str, confidence: float
 @click.argument("target_id")
 @click.option("--rationale", default=None)
 @click.option("--dry-run", is_flag=True, help="Validate without filing the proposal.")
+@click.option(
+    "--cascade", is_flag=True,
+    help="Include the referrer edits in the proposal instead of being refused.",
+)
 def propose_delete_cmd(
-    target_kind: str, target_id: str, rationale: str | None, dry_run: bool
+    target_kind: str, target_id: str, rationale: str | None, dry_run: bool,
+    cascade: bool,
 ) -> None:
     """File a review-gated request to hard-delete an artifact."""
     store = _load_store()
@@ -2381,6 +2395,7 @@ def propose_delete_cmd(
             target_id=target_id,
             rationale=rationale,
             dry_run=dry_run,
+            cascade=cascade,
             proposed_by=_whoami(),
         )
     click.echo(pr.id)
@@ -2399,9 +2414,51 @@ def source() -> None:
 @click.option("--title", default=None)
 @click.option("--url", default=None)
 @click.option("--type", "source_type", default="file", show_default=True)
-def source_add(path: str, title: str | None, url: str | None, source_type: str) -> None:
-    """Register a file as a Source; prints its sha256 id."""
+@click.option(
+    "--raw",
+    is_flag=True,
+    help="Register the bytes as-is, skipping pdf/audio text extraction.",
+)
+@click.option(
+    "--transcribe-cmd",
+    default=None,
+    help="Override sources.transcribe_cmd for this audio file.",
+)
+def source_add(
+    path: str,
+    title: str | None,
+    url: str | None,
+    source_type: str,
+    raw: bool,
+    transcribe_cmd: str | None,
+) -> None:
+    """Register a file as a Source; prints its sha256 id.
+
+    A pdf or an audio file is extracted to text first, so the quotes a claim
+    cites are actually present in the stored bytes and earn a receipt. The
+    extracted text carries a page/timestamp map back to the original — pass
+    --raw to register the binary untouched instead.
+    """
     store = _load_store()
+    kind = None if raw else media_mod.media_kind(Path(path))
+    if kind is not None:
+        with _cli_errors():
+            src = media_mod.register_media_source(
+                store,
+                Path(path),
+                kind=kind,
+                title=title,
+                transcribe_cmd=transcribe_cmd,
+            )
+        audit_mod.log_event(
+            store.kb_dir,
+            event="source.add",
+            actor=_whoami(),
+            object_ids=[src.id],
+            data={"media": kind.value},
+        )
+        click.echo(src.id)
+        return
     data = Path(path).read_bytes()
     with _cli_errors():
         src = store.put_source(
@@ -2459,6 +2516,33 @@ def source_fetch(
         data={"url": url},
     )
     click.echo(src.id)
+
+
+@source.command("locate")
+@click.argument("source_id")
+@click.argument("quote")
+def source_locate(source_id: str, quote: str) -> None:
+    """Print where QUOTE sits in SOURCE_ID — byte span plus page/timestamp.
+
+    The receipt made legible: for a pdf or an audio source this answers "which
+    page" or "which point in the recording", which is the difference between a
+    citation a reviewer can check against the original and one they cannot.
+    """
+    store = _load_store()
+    with _cli_errors():
+        src = store.get_source(source_id)
+        content = store.read_source_content(source_id)
+    span = receipts_mod.locate_span(content, quote)
+    if span is None:
+        click.echo("quote not found verbatim in source", err=True)
+        sys.exit(1)
+    start, end = span
+    coordinates = media_mod.source_coordinates(src)
+    click.echo(
+        media_mod.locator_for_span(coordinates, start, end)
+        if coordinates
+        else f"b{start}-{end}"
+    )
 
 
 @source.command("verify")
@@ -2564,6 +2648,95 @@ def notify_test(url: str, secret: str | None) -> None:
     click.echo("delivered" if ok else "delivery failed")
     if not ok:
         sys.exit(1)
+
+
+# --- correction capture ---------------------------------------------------
+
+
+@cli.command(name="capture-correction")
+@click.argument("prompt")
+@click.option("--session-id", default=None)
+@click.option("--context", default=None, help="what the agent had just done")
+def capture_correction_cmd(
+    prompt: str, session_id: str | None, context: str | None
+) -> None:
+    """File a user correction as a pending claim proposal, if it is one."""
+    store = _load_store()
+    with _cli_errors():
+        report = correction_mod.capture(
+            store, prompt=prompt, session_id=session_id,
+            agent=_whoami(), context=context,
+        )
+    click.echo(json.dumps(report, indent=2))
+
+
+# --- goals ----------------------------------------------------------------
+
+
+@cli.command(name="propose-goal")
+@click.option("--title", required=True)
+@click.option("--detail", default=None)
+@click.option("--claim", "claims", multiple=True, help="claim id this goal concerns")
+@click.option("--entity", "entities", multiple=True, help="entity id this goal concerns")
+@click.option("--tag", "tags", multiple=True)
+@click.option("--rationale", default=None)
+def propose_goal_cmd(
+    title: str,
+    detail: str | None,
+    claims: tuple[str, ...],
+    entities: tuple[str, ...],
+    tags: tuple[str, ...],
+    rationale: str | None,
+) -> None:
+    """Propose an in-flight objective for review."""
+    store = _load_store()
+    with _cli_errors():
+        pr = propose_goal(
+            store,
+            title=title,
+            detail=detail,
+            claims=list(claims),
+            entities=list(entities),
+            tags=list(tags),
+            rationale=rationale,
+            proposed_by=_whoami(),
+        )
+    click.echo(pr.id)
+
+
+@cli.command(name="goals")
+@click.option(
+    "--status",
+    default="open",
+    show_default=True,
+    help="goal status to list, or 'all' for every goal",
+)
+def list_goals_cmd(status: str) -> None:
+    """List approved goals, oldest first."""
+    store = _load_store()
+    with _cli_errors():
+        found = goals_mod.list_goals(
+            store, status=None if status == "all" else status
+        )
+    if not found:
+        click.echo(f"no {status} goals" if status != "all" else "no goals")
+        return
+    for goal in found:
+        click.echo(f"{goal.id:50} [{goal.status.value}] {goal.title}")
+
+
+@cli.command(name="goal-status")
+@click.argument("goal_id")
+@click.argument("status")
+@click.option("--reason", default=None)
+def set_goal_status_cmd(goal_id: str, status: str, reason: str | None) -> None:
+    """Move a goal to open / done / abandoned / blocked."""
+    store = _load_store()
+    with _cli_errors():
+        goal = life.set_goal_status(
+            store, goal_id=goal_id, status=status, actor=_whoami(), reason=reason
+        )
+    click.echo(f"{goal.id} -> {goal.status.value}")
 
 
 # --- lifecycle ------------------------------------------------------------
@@ -2947,6 +3120,18 @@ def capture_observe_cmd() -> None:
         session_id = str(payload.get("session_id") or "")
         if not session_id:
             return
+        start, ok = _hook_start(payload)
+        if not ok:
+            return
+        store = _capture_store(start)
+        if store is None:
+            return
+        cfg = capture_mod.load_config(store)
+        if not cfg.enabled:
+            return
+        if not cfg.realtime:
+            _emit_json({"skipped": "realtime-disabled"})
+            return
         tool_input = payload.get("tool_input")
         obs = capture_mod.summarize_tool(
             payload.get("tool_name"),
@@ -2955,18 +3140,13 @@ def capture_observe_cmd() -> None:
         )
         if obs is None:
             return
-        start, ok = _hook_start(payload)
-        if not ok:
-            return
-        store = _capture_store(start)
-        if store is None:
-            return
         tool_use_id = payload.get("tool_use_id")
         capture_mod.observe(
             store, session_id,
             tool=obs["tool"], summary=obs["summary"],
             files=obs.get("files"), cmd=obs.get("cmd"),
             tool_use_id=str(tool_use_id) if tool_use_id else None,
+            config=cfg,
         )
     except Exception:
         # a capture failure must never break the user's tool call.
@@ -3246,9 +3426,11 @@ def recall_cmd() -> None:
               help="Cap drafted pages (default: compile.max_pages, 5).")
 @click.option("--llm-cmd", default=None,
               help="Override compile.llm_cmd from config.yaml for this run.")
+@click.option("--profile", "profile", is_flag=True,
+              help="Compile the operator-profile page instead of topic pages.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
 def compile_cmd(dry_run: bool, max_pages: int | None,
-                llm_cmd: str | None, as_json: bool) -> None:
+                llm_cmd: str | None, profile: bool, as_json: bool) -> None:
     """Compile approved claims into topic-page proposals (llm-wiki ingest).
 
     Runs the deployment-configured LLM (compile.llm_cmd) over the live
@@ -3259,10 +3441,17 @@ def compile_cmd(dry_run: bool, max_pages: int | None,
     store = _load_store()
     actor = os.environ.get("VOUCH_AGENT") or compile_mod.COMPILE_ACTOR
     try:
-        report = compile_mod.compile_kb(
-            store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
-            max_pages=max_pages, dry_run=dry_run,
-        )
+        if profile:
+            # A different page, a different claim set, the same review gate.
+            report = compile_mod.compile_profile(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                dry_run=dry_run,
+            )
+        else:
+            report = compile_mod.compile_kb(
+                store, actor=actor, triggered_by=_whoami(), llm_cmd=llm_cmd,
+                max_pages=max_pages, dry_run=dry_run,
+            )
     except compile_mod.CompileError as e:
         raise click.ClickException(str(e)) from e
     if as_json:
@@ -3290,7 +3479,9 @@ def render_wiki_cmd(out_dir: str | None) -> None:
     With --out, writes index.md and MOC.md there; otherwise prints the index.
     """
     store = _load_store()
-    pages = store.list_pages()
+    # same live set as recall / digest / search — archived pages stay on disk
+    # but are out of the wiki front door (#695).
+    pages = [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED]
     index = wiki_render_mod.render_index(pages)
     if out_dir is None:
         _echo(index)
@@ -3760,6 +3951,216 @@ def graph(session: str | None, fmt: str) -> None:
     click.echo(text, nl=False)
 
 
+@cli.group(name="agents")
+def agents_group() -> None:
+    """Which agents can write to this KB, and what each one did."""
+
+
+@agents_group.command("register")
+@click.argument("name")
+@click.option("--subject", required=True,
+              help="The token's auth subject (vouch agents subject <token>).")
+@click.option("--scope", "scopes", multiple=True,
+              help="Advisory scope to record (repeatable).")
+@click.option("--note", default=None, help="What this agent is for.")
+def agents_register(name: str, subject: str, scopes: tuple[str, ...],
+                    note: str | None) -> None:
+    """Give a token's subject a readable name."""
+    store = _load_store()
+    with _cli_errors():
+        agent = agents_mod.register(
+            store, subject=subject, name=name, actor=_whoami(),
+            scopes=tuple(scopes), note=note,
+        )
+    click.echo(f"registered {agent.name} ({agent.subject}) as {agent.status.value}")
+
+
+@agents_group.command("subject")
+@click.argument("token")
+def agents_subject(token: str) -> None:
+    """Print a token's auth subject without storing the token."""
+    click.echo(trust_mod.auth_subject_for_token(token))
+
+
+@agents_group.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit agents as JSON.")
+def agents_list(as_json: bool) -> None:
+    """Name, status, scopes, claimed and last-used for every agent."""
+    store = _load_store()
+    with _cli_errors():
+        agents = agents_mod.load_registry(store)
+    if as_json:
+        _emit_json({"agents": [
+            a.to_dict() | {
+                "last_seen": (
+                    ls.isoformat(timespec="seconds")
+                    if (ls := agents_mod.last_seen(store, a)) else None
+                )
+            }
+            for a in agents
+        ]})
+        return
+    if not agents:
+        click.echo(
+            "no registered agents. an unregistered token still authenticates "
+            "as an unnamed active agent."
+        )
+        return
+    for a in agents:
+        claimed = f"{a.claimed_at:%Y-%m-%d}" if a.claimed_at else "-"
+        seen = agents_mod.last_seen(store, a)
+        last = f"{seen:%Y-%m-%d}" if seen else "never"
+        scopes = ",".join(a.scopes) if a.scopes else "-"
+        click.echo(
+            f"{a.status.value:<8} {a.name:<24} {a.subject:<18} "
+            f"claimed={claimed}  last-used={last}  scopes={scopes}"
+        )
+
+
+@agents_group.command("show")
+@click.argument("name")
+@click.option("--limit", default=50, show_default=True, type=int,
+              help="Newest N events.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the replay as JSON.")
+def agents_show(name: str, limit: int, as_json: bool) -> None:
+    """Replay every audit event this agent produced."""
+    store = _load_store()
+    with _cli_errors():
+        agent = agents_mod.find(store, name)
+        if agent is None:
+            raise agents_mod.AgentError(f"unknown agent {name!r}")
+        events = agents_mod.replay(store, name, limit=limit)
+    if as_json:
+        _emit_json({"agent": agent.to_dict(), "events": events})
+        return
+    click.echo(f"{agent.name} ({agent.subject}) — {agent.status.value}")
+    if not events:
+        click.echo("no audit events attributed to this agent yet.")
+        return
+    for ev in events:
+        ids = ",".join(ev["object_ids"]) or "-"
+        # "<-" is something done to the agent; "  " is something it did.
+        marker = "  " if ev["by_agent"] else "<-"
+        click.echo(f"  {marker} {ev['created_at']}  {ev['event']:<26} {ids}")
+
+
+def _transition(name: str, status: agents_mod.AgentStatus, verb: str) -> None:
+    store = _load_store()
+    with _cli_errors():
+        agent = agents_mod.set_status(store, name, status, actor=_whoami())
+    click.echo(f"{verb} {agent.name} ({agent.subject})")
+
+
+@agents_group.command("pause")
+@click.argument("name")
+def agents_pause(name: str) -> None:
+    """Stop this agent's credential authenticating, reversibly."""
+    _transition(name, agents_mod.AgentStatus.PAUSED, "paused")
+
+
+@agents_group.command("resume")
+@click.argument("name")
+def agents_resume(name: str) -> None:
+    """Let a paused agent authenticate again."""
+    _transition(name, agents_mod.AgentStatus.ACTIVE, "resumed")
+
+
+@agents_group.command("revoke")
+@click.argument("name")
+@click.confirmation_option(
+    prompt="revocation is terminal — the agent cannot be resumed. continue?"
+)
+def agents_revoke(name: str) -> None:
+    """Permanently stop this credential. Terminal — issue a new token instead."""
+    _transition(name, agents_mod.AgentStatus.REVOKED, "revoked")
+
+
+@cli.command("pin")
+@click.argument("artifact_id")
+@click.option("--local", is_flag=True,
+              help="Pin only for me — kept out of git in .vouch/pins.local.yaml.")
+@click.option("--expires", default=None,
+              help="Auto-drop the pin after this long (e.g. 7d) or at an ISO date.")
+@click.option("--note", default=None, help="Why this is pinned.")
+def pin_cmd(artifact_id: str, local: bool, expires: str | None,
+            note: str | None) -> None:
+    """Keep a claim or page in every context pack until unpinned."""
+    store = _load_store()
+    expires_at = None
+    with _cli_errors():
+        if expires is not None:
+            # An absolute date is already the answer, so only a duration gets
+            # mirrored. parse_since returns ISO input unchanged, and mirroring
+            # that around now turns a future date into a past one — the pin
+            # would be created already expired, silently.
+            try:
+                expires_at = datetime.fromisoformat(expires)
+            except ValueError:
+                # Not a date, so read it as a duration counted backwards and
+                # mirror it forwards.
+                now = datetime.now(UTC)
+                past = metrics_mod.parse_since(expires)
+                if past is None:
+                    # "all" and "" mean "no lower bound" to parse_since. As an
+                    # expiry that would silently mean "never", which is already
+                    # what omitting the flag does — so it is a typo, not a
+                    # request worth honouring.
+                    raise click.ClickException(
+                        f"--expires {expires!r}: expected a duration like '7d' "
+                        "or an ISO date like '2026-08-15'"
+                    ) from None
+                expires_at = now + (now - past)
+            else:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
+        p = pins_mod.add_pin(
+            store, artifact_id, pinned_by=_whoami(), local=local,
+            expires_at=expires_at, note=note,
+        )
+    where = "local" if local else "shared"
+    click.echo(f"pinned {p.kind}/{p.artifact_id} ({where})")
+
+
+@cli.command("unpin")
+@click.argument("artifact_id")
+@click.option("--local", is_flag=True, help="Remove from the local pin set.")
+def unpin_cmd(artifact_id: str, local: bool) -> None:
+    """Stop pinning an artifact."""
+    store = _load_store()
+    with _cli_errors():
+        removed = pins_mod.remove_pin(store, artifact_id, local=local)
+    if not removed:
+        raise click.ClickException(
+            f"{artifact_id} is not in the {'local' if local else 'shared'} pin set"
+        )
+    click.echo(f"unpinned {artifact_id}")
+
+
+@cli.group(name="pins")
+def pins_group() -> None:
+    """The working set that always enters the context pack."""
+
+
+@pins_group.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit pins as JSON.")
+def pins_list(as_json: bool) -> None:
+    """Show every live pin, shared then local."""
+    store = _load_store()
+    with _cli_errors():
+        pins = pins_mod.load_pins(store)
+    if as_json:
+        _emit_json({"pins": [p.to_dict() | {"local": p.local} for p in pins]})
+        return
+    if not pins:
+        click.echo("no pins. `vouch pin <id>` keeps an artifact in every pack.")
+        return
+    for p in pins:
+        scope = "local " if p.local else "shared"
+        expiry = f"  expires {p.expires_at:%Y-%m-%d}" if p.expires_at else ""
+        note = f"  — {p.note}" if p.note else ""
+        click.echo(f"{scope}  {p.kind}/{p.artifact_id}{expiry}{note}")
+
+
 @cli.group()
 def provenance() -> None:
     """Provenance graph cache operations."""
@@ -3911,6 +4312,35 @@ def eval_recall(queries: str, k: int, baseline: str | None,
             raise click.ClickException(message)
 
 
+@eval_group.command("effectiveness")
+@click.option("--window", default=None,
+              help="Sessions to score: a duration (90d), an ISO date, or 'all'.")
+@click.option("--min-samples", default=None, type=int,
+              help="Sessions an artifact needs before a confident verdict is allowed.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]),
+              default="text", show_default=True)
+def eval_effectiveness(window: str | None, min_samples: int | None, fmt: str) -> None:
+    """Rank approved artifacts by the outcome of the sessions they entered."""
+    from .eval.effectiveness import (
+        DEFAULT_MIN_SAMPLES,
+        DEFAULT_WINDOW,
+        compute,
+        format_report,
+    )
+
+    store = _load_store()
+    with _cli_errors():
+        result = compute(
+            store,
+            since=metrics_mod.parse_since(window or DEFAULT_WINDOW),
+            min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else min_samples,
+        )
+    if fmt == "json":
+        _emit_json(result)
+        return
+    click.echo(format_report(result))
+
+
 @cli.command()
 @click.option(
     "--embeddings/--no-embeddings",
@@ -3956,7 +4386,9 @@ def audit(tail: int, as_json: bool, project: str | None, agent: str | None) -> N
         project=project,
         agent=agent,
     )
-    events = list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer))[-tail:]
+    events = audit_mod.tail_events(
+        list(audit_mod.read_events(store.kb_dir, store=store, viewer=viewer)), tail
+    )
     if as_json:
         _emit_json({
             "viewer": {"project": viewer.project, "agent": viewer.agent},

@@ -16,8 +16,10 @@ from typing import Any
 
 import yaml
 
-from .models import ClaimStatus, ProposalStatus
+from .config_coerce import coerce_bool
+from .models import ClaimStatus, PageStatus, ProposalStatus
 from .proposals import ProposalError, propose_page
+from .scoping import ViewerContext, is_visible, viewer_from
 from .storage import KBStore
 
 logger = logging.getLogger(__name__)
@@ -70,8 +72,7 @@ def _load_theme_config(store: KBStore) -> dict[str, Any]:
     if not isinstance(themes_cfg, dict):
         themes_cfg = {}
 
-    enabled = themes_cfg.get("enabled", True)
-    enabled = bool(enabled) if isinstance(enabled, bool) else True
+    enabled = coerce_bool(themes_cfg.get("enabled", True), True)
 
     ms = themes_cfg.get("min_sessions", _DEFAULT_MIN_SESSIONS)
     ms = ms if isinstance(ms, int) and ms > 0 else _DEFAULT_MIN_SESSIONS
@@ -96,11 +97,15 @@ def detect_themes(
     min_sessions: int | None = None,
     min_claims: int | None = None,
     top_k: int | None = None,
+    viewer: ViewerContext | None = None,
 ) -> DetectResult:
     """Detect recurring entity clusters across sessions.
 
     Pure read-only operation. Returns ranked clusters without persisting
-    anything. Excludes archived, superseded, redacted, and pending claims.
+    anything. Excludes archived, superseded, redacted, and pending claims,
+    and anything the viewer cannot retrieve — ``viewer`` defaults to the
+    config-resolved context, so a KB read with no explicit viewer reads as
+    its own project (see ``scoping.viewer_from``).
     """
     cfg = _load_theme_config(store)
     if not cfg["enabled"]:
@@ -113,11 +118,20 @@ def detect_themes(
     # Collect approved claims that reference entities and belong to sessions.
     claims = store.list_claims()
     # Also exclude pending (working) — only look at review-gated claims.
+    # Viewer-filtered for the same reason search/recall/salience are: a
+    # cluster is a list of claim ids and session ids, so an unfiltered scan
+    # hands a private or cross-project claim's id — and the session that
+    # produced it — to a viewer that cannot retrieve the claim itself. The
+    # leak is durable rather than advisory: `propose_theme` writes those ids
+    # into a theme page body that then lands in the KB on approval.
+    if viewer is None:
+        viewer = viewer_from(config_path=store.config_path)
     eligible = [
         c for c in claims
         if c.status not in _EXCLUDED_STATUSES
         and c.entities
         and c.approved_by is not None
+        and is_visible(c.scope, viewer)
     ]
 
     # Map each claim to its session(s) via decided proposals.
@@ -253,9 +267,20 @@ def _resolvable_entities(store: KBStore) -> set[str]:
 
 
 def _existing_theme_entity_sets(store: KBStore) -> set[frozenset[str]]:
-    """Return entity sets of existing theme pages and pending theme proposals."""
+    """Return entity sets of live theme pages and pending theme proposals.
+
+    Archived theme pages are excluded for the same reason claims are excluded
+    via ``_EXCLUDED_STATUSES``: archive is how an operator retires a wrong
+    theme, and counting a retired page here makes that retirement permanent
+    for its entity cluster — the same one-way trap compile's TAKEN TOPICS had
+    (#700). A *pending* proposal still counts: awaiting review is not
+    retirement, and two proposals for one cluster is the duplicate this guard
+    exists to prevent.
+    """
     result: set[frozenset[str]] = set()
     for page in store.list_pages():
+        if page.status is PageStatus.ARCHIVED:
+            continue
         if page.type == "theme" and page.entities:
             result.add(frozenset(page.entities))
     for prop in store.list_proposals(ProposalStatus.PENDING):

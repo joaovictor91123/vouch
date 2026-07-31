@@ -34,7 +34,8 @@ from typing import Any
 
 import yaml
 
-from .models import Proposal, ProposalKind, ProposalStatus
+from .config_coerce import coerce_bool
+from .models import ClaimStatus, PageStatus, Proposal, ProposalKind, ProposalStatus
 from .proposals import _payload_block_reason
 from .storage import ArtifactNotFoundError, KBStore
 
@@ -49,6 +50,14 @@ _APPROVE_THRESHOLD = 0.7
 _REJECT_THRESHOLD = 0.35
 _FUZZY_MATCH_FLOOR = 0.3
 _CONTRADICTION_CANDIDATE_FLOOR = 0.35
+
+# same live-set as context/search/recall — archived knowledge must not reject
+# near-identical *new* proposals as duplicates of retired text.
+_RETRACTED_CLAIM_STATUSES = frozenset({
+    ClaimStatus.ARCHIVED,
+    ClaimStatus.SUPERSEDED,
+    ClaimStatus.REDACTED,
+})
 
 _NEGATION_MARKERS = frozenset({
     "not", "no", "never", "cannot", "isnt", "doesnt", "wont", "wasnt",
@@ -80,8 +89,7 @@ def triage_cfg(store: KBStore) -> TriageConfig:
     triage = cfg.get("triage")
     triage = triage if isinstance(triage, dict) else {}
 
-    enabled = triage.get("enabled", False)
-    enabled = bool(enabled) if isinstance(enabled, bool) else False
+    enabled = coerce_bool(triage.get("enabled", False), False)
 
     backend = triage.get("backend", "embeddings")
     backend = backend if isinstance(backend, str) else "embeddings"
@@ -143,7 +151,9 @@ def _claim_text_pool(
     store: KBStore, *, exclude_proposal_id: str, exclude_claim_id: str | None,
 ) -> list[tuple[str, str]]:
     pool = [
-        (c.id, c.text) for c in store.list_claims() if c.id != exclude_claim_id
+        (c.id, c.text)
+        for c in store.list_claims()
+        if c.id != exclude_claim_id and c.status not in _RETRACTED_CLAIM_STATUSES
     ]
     pool += [
         (p.id, str(p.payload.get("text", "")))
@@ -151,6 +161,25 @@ def _claim_text_pool(
         if p.kind == ProposalKind.CLAIM and p.id != exclude_proposal_id
     ]
     return pool
+
+
+def _live_embedding_hits(
+    store: KBStore, hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """drop embedding hits that point at retracted approved claims."""
+    live: list[dict[str, Any]] = []
+    for hit in hits:
+        if hit.get("artifact_kind") != "claim":
+            live.append(hit)
+            continue
+        try:
+            claim = store.get_claim(str(hit["artifact_id"]))
+        except ArtifactNotFoundError:
+            live.append(hit)
+            continue
+        if claim.status not in _RETRACTED_CLAIM_STATUSES:
+            live.append(hit)
+    return live
 
 
 def _embedding_hits_for_claim(
@@ -175,8 +204,11 @@ def _embedding_hits_for_claim(
         from .embeddings.similarity import find_similar_on_propose
     except ImportError:
         return None
-    return find_similar_on_propose(
-        store, text, exclude_claim_id=proposal.payload.get("id"),
+    return _live_embedding_hits(
+        store,
+        find_similar_on_propose(
+            store, text, exclude_claim_id=proposal.payload.get("id"),
+        ),
     )
 
 
@@ -204,10 +236,24 @@ def _topical_fit_scores(store: KBStore, proposal: Proposal, embedder: Any) -> li
     except Exception:
         return []
     exclude_id = proposal.payload.get("id")
-    return [
-        float(cos) for _kind, cid, _snip, cos in hits
-        if cid != exclude_id and cos < dup_threshold
-    ]
+    scores: list[float] = []
+    for kind, cid, _snip, cos in hits:
+        if cid == exclude_id or cos >= dup_threshold:
+            continue
+        if kind == "claim":
+            try:
+                if store.get_claim(cid).status in _RETRACTED_CLAIM_STATUSES:
+                    continue
+            except ArtifactNotFoundError:
+                pass
+        elif kind == "page":
+            try:
+                if store.get_page(cid).status is PageStatus.ARCHIVED:
+                    continue
+            except ArtifactNotFoundError:
+                pass
+        scores.append(float(cos))
+    return scores
 
 
 # --- signals -----------------------------------------------------------------
@@ -297,7 +343,11 @@ def _duplication_risk_structural(store: KBStore, proposal: Proposal) -> dict[str
         ]
     else:  # PAGE
         name = str(proposal.payload.get("title", "")).strip()
-        pool = [(pg.id, pg.title) for pg in store.list_pages()]
+        pool = [
+            (pg.id, pg.title)
+            for pg in store.list_pages()
+            if pg.status is not PageStatus.ARCHIVED
+        ]
         pool += [
             (p.id, str(p.payload.get("title", "")))
             for p in store.list_proposals(ProposalStatus.PENDING)
@@ -394,6 +444,8 @@ def _signal_contradiction_risk(
             claim = store.get_claim(cid)
         except ArtifactNotFoundError:
             continue  # candidate is a pending proposal, not yet an approved claim
+        if claim.status in _RETRACTED_CLAIM_STATUSES:
+            continue
         if entity_ids & set(claim.entities) and _has_negation(claim.text) != neg:
             conflicts.append((cid, sim))
 

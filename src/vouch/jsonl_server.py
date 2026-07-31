@@ -30,7 +30,9 @@ import yaml
 
 from . import audit, bundle, health, volunteer_context
 from . import compile as compile_mod
+from . import correction as correction_mod
 from . import digest as digest_mod
+from . import goals as goals_mod
 from . import hot_memory as hot_mod
 from . import lifecycle as life
 from . import metrics as metrics_mod
@@ -53,6 +55,7 @@ from .proposals import (
     propose_claim,
     propose_delete,
     propose_entity,
+    propose_goal,
     propose_page,
     propose_relation,
     reject,
@@ -85,15 +88,20 @@ def _store() -> KBStore:
 
 
 def _store_or_none() -> KBStore | None:
-    """The KB when one resolves, else None.
+    """the kb when one resolves, else None.
 
-    Only for reads whose data source is outside `.vouch/` — the KB is an
-    enrichment, not the subject. Every method that reads or writes knowledge
-    must keep using `_store()` so a missing KB stays a hard error.
+    only for reads whose data source is outside `.vouch/` — the kb is an
+    enrichment, not the subject. every method that reads or writes knowledge
+    must keep using `_store()` so a missing kb stays a hard error.
+
+    catches `KBNotFoundError` directly rather than the `RuntimeError` that
+    `_store()` re-raises it as: that wrapper is indistinguishable from a
+    malformed-config or permission failure, and reporting one of those as
+    "no kb" would silently drop enrichment instead of surfacing a real fault.
     """
     try:
-        return _store()
-    except RuntimeError:
+        return KBStore(discover_root())
+    except KBNotFoundError:
         return None
 
 
@@ -545,6 +553,7 @@ def _h_propose_delete(p: dict) -> dict:
         rationale=p.get("rationale"),
         session_id=p.get("session_id"),
         dry_run=bool(p.get("dry_run", False)),
+        cascade=bool(p.get("cascade", False)),
         proposed_by=_agent(),
     )
     return {
@@ -553,6 +562,62 @@ def _h_propose_delete(p: dict) -> dict:
         "kind": pr.kind.value,
         "dry_run": bool(p.get("dry_run", False)),
     }
+
+
+def _h_capture_correction(p: dict) -> dict:
+    return correction_mod.capture(
+        _store(),
+        prompt=p["prompt"],
+        session_id=p.get("session_id"),
+        agent=_agent(),
+        context=p.get("context"),
+    )
+
+
+def _h_propose_goal(p: dict) -> dict:
+    pr = propose_goal(
+        _store(),
+        title=p["title"],
+        detail=p.get("detail"),
+        claims=p.get("claims"),
+        entities=p.get("entities"),
+        tags=p.get("tags"),
+        rationale=p.get("rationale"),
+        slug_hint=p.get("slug_hint"),
+        session_id=p.get("session_id"),
+        dry_run=bool(p.get("dry_run", False)),
+        proposed_by=_agent(),
+    )
+    return {
+        "proposal_id": pr.id,
+        "status": pr.status.value,
+        "kind": pr.kind.value,
+        "dry_run": bool(p.get("dry_run", False)),
+    }
+
+
+def _h_list_goals(p: dict) -> dict:
+    store = _store()
+    found = goals_mod.list_goals(
+        store,
+        status=p.get("status", "open"),
+        limit=p.get("limit"),
+    )
+    items = [g.model_dump(mode="json") for g in found]
+    return hot_mod.attach_hot_memory(  # type: ignore[no-any-return]
+        items, store, query=None, list_envelope=True,
+    )
+
+
+def _h_set_goal_status(p: dict) -> dict:
+    g = life.set_goal_status(
+        _store(),
+        goal_id=p["goal_id"],
+        status=p["status"],
+        actor=_agent(),
+        reason=p.get("reason"),
+    )
+    return {"id": g.id, "status": g.status.value, "history": g.history}
 
 
 def _h_approve(p: dict) -> dict:
@@ -760,7 +825,9 @@ def _h_audit(p: dict) -> dict:
     s = _store()
     viewer = viewer_from_params(s, p)
     tail = int(p.get("tail", 50))
-    events = list(audit.read_events(s.kb_dir, store=s, viewer=viewer))[-tail:]
+    events = audit.tail_events(
+        list(audit.read_events(s.kb_dir, store=s, viewer=viewer)), tail
+    )
     return {
         "viewer": {"project": viewer.project, "agent": viewer.agent},
         "events": [e.model_dump(mode="json") for e in events],
@@ -791,6 +858,23 @@ def _h_eval_embeddings(p: dict) -> dict:
         kb_dir=_store().kb_dir,
         queries_file=Path(p["queries_path"]),
         k=int(p.get("k", 10)),
+    )
+
+
+def _h_effectiveness(p: dict) -> dict:
+    from .eval.effectiveness import DEFAULT_MIN_SAMPLES, DEFAULT_WINDOW, compute
+
+    # One shared implementation across MCP / JSONL / CLI. Read-only: it reads
+    # the audit log and the retrieval-event log and reports.
+    # `or` rather than a .get default: an explicit {"window": null} on the wire
+    # puts None in the dict, and str(None) is the literal "None", which
+    # parse_since rejects with a user-facing error instead of defaulting.
+    window = p.get("window") or DEFAULT_WINDOW
+    min_samples = p.get("min_samples")
+    return compute(
+        _store(),
+        since=metrics_mod.parse_since(str(window)),
+        min_samples=DEFAULT_MIN_SAMPLES if min_samples is None else int(min_samples),
     )
 
 
@@ -941,6 +1025,9 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.propose_entity": _h_propose_entity,
     "kb.propose_relation": _h_propose_relation,
     "kb.propose_delete": _h_propose_delete,
+    "kb.propose_goal": _h_propose_goal,
+    "kb.list_goals": _h_list_goals,
+    "kb.set_goal_status": _h_set_goal_status,
     "kb.approve": _h_approve,
     "kb.reject": _h_reject,
     "kb.reject_extracted": _h_reject_extracted,
@@ -957,6 +1044,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.session_end": _h_session_end,
     "kb.volunteer_context": _h_volunteer_context,
     "kb.crystallize": _h_crystallize,
+    "kb.capture_correction": _h_capture_correction,
     "kb.index_rebuild": _h_index_rebuild,
     "kb.lint": _h_lint,
     "kb.doctor": _h_doctor,
@@ -967,6 +1055,7 @@ HANDLERS: dict[str, Callable[[dict], Any]] = {
     "kb.reindex_embeddings": _h_reindex_embeddings,
     "kb.dedup_scan": _h_dedup_scan,
     "kb.eval_embeddings": _h_eval_embeddings,
+    "kb.effectiveness": _h_effectiveness,
     "kb.embeddings_stats": _h_embeddings_stats,
     "kb.why": _h_why,
     "kb.trace": _h_trace,

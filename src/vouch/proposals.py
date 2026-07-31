@@ -23,6 +23,8 @@ from .models import (
     ArtifactScope,
     Claim,
     Entity,
+    Goal,
+    GoalStatus,
     Page,
     Proposal,
     ProposalKind,
@@ -78,6 +80,9 @@ def missing_claim_refs(store: KBStore, proposal: Proposal) -> list[str]:
 EXPIRE_REASON = "expired"
 EXPIRE_ACTOR = "vouch-expire"
 ADMISSION_ACTOR = "vouch-admission"
+# Payload flag stamped by propose_page(update_existing=True). Popped before
+# Page model validation so it never reaches the durable artifact.
+_UPDATE_EXISTING_KEY = "_update_existing"
 _DEFAULT_EXPIRE_PENDING_DAYS = 90
 
 
@@ -334,6 +339,7 @@ def propose_page(
     session_id: str | None = None,
     dry_run: bool = False,
     scope: dict[str, Any] | str | None = None,
+    update_existing: bool = False,
 ) -> Proposal:
     if not title.strip():
         raise ProposalError("page title is empty")
@@ -369,8 +375,20 @@ def propose_page(
         )
     except PageKindError as e:
         raise ProposalError(str(e)) from e
-    payload = {
-        "id": slug_hint or _slugify(title),
+    page_id = slug_hint or _slugify(title)
+    # Opt-in update path for vault_to_kb (#219). Without this flag, approve()
+    # refuses an existing page id the same way it refuses claim collisions —
+    # otherwise a colliding title/slug (or a malicious slug_hint) silently
+    # overwrites durable content via update_page.
+    if update_existing:
+        try:
+            store.get_page(page_id)
+        except ArtifactNotFoundError as e:
+            raise ProposalError(
+                f"cannot update: page {page_id} does not exist"
+            ) from e
+    payload: dict[str, Any] = {
+        "id": page_id,
         "title": title.strip(),
         "body": body,
         "type": page_type,
@@ -380,6 +398,8 @@ def propose_page(
         "tags": tags or [],
         "metadata": meta,
     }
+    if update_existing:
+        payload[_UPDATE_EXISTING_KEY] = True
     _stamp_scope(store, payload, scope)
     return _file_proposal(
         store, kind=ProposalKind.PAGE, payload=payload,
@@ -493,6 +513,62 @@ def propose_relation(
     )
 
 
+def propose_goal(
+    store: KBStore,
+    *,
+    title: str,
+    proposed_by: str,
+    detail: str | None = None,
+    claims: list[str] | None = None,
+    entities: list[str] | None = None,
+    tags: list[str] | None = None,
+    scope: dict[str, Any] | str | None = None,
+    rationale: str | None = None,
+    slug_hint: str | None = None,
+    session_id: str | None = None,
+    dry_run: bool = False,
+) -> Proposal:
+    """File a review-gated objective. Approving it creates the `open` goal.
+
+    A goal is knowledge about intent, so it takes the same route as every
+    other write: pending proposal → human approve → durable yaml. There is
+    deliberately no direct-write entry point, and the payload is pinned to
+    `status: open` — a proposal cannot land a goal that is already `done`,
+    which would put a transition on disk that never passed through
+    `lifecycle.set_goal_status` and so never reached the audit log.
+    """
+    if not title.strip():
+        raise ProposalError("goal title is empty")
+    for cid in claims or []:
+        if not store._claim_path(cid).exists():
+            raise ProposalError(f"unknown claim id: {cid}")
+    for eid in entities or []:
+        if not store._entity_path(eid).exists():
+            raise ProposalError(f"unknown entity id: {eid}")
+    payload: dict[str, Any] = {
+        "id": slug_hint or _slugify(title),
+        "title": title.strip(),
+        "detail": detail,
+        "status": GoalStatus.OPEN.value,
+        "claims": list(claims or []),
+        "entities": list(entities or []),
+        "tags": list(tags or []),
+    }
+    _stamp_scope(store, payload, scope)
+    # Validate against the model here, at propose time, for the same reason
+    # propose_entity does: a payload that can never pass approve() must not
+    # sit in the pending queue waiting for someone to notice.
+    try:
+        Goal(**payload)
+    except (ValidationError, TypeError) as e:
+        raise ProposalError(f"invalid goal payload: {e}") from e
+    return _file_proposal(
+        store, kind=ProposalKind.GOAL, payload=payload,
+        proposed_by=proposed_by, session_id=session_id,
+        rationale=rationale, dry_run=dry_run,
+    )
+
+
 def propose_delete(
     store: KBStore,
     *,
@@ -502,6 +578,7 @@ def propose_delete(
     rationale: str | None = None,
     session_id: str | None = None,
     dry_run: bool = False,
+    cascade: bool = False,
 ) -> Proposal:
     """File a review-gated request to hard-delete a durable artifact.
 
@@ -509,6 +586,12 @@ def propose_delete(
     referenced by another artifact — the maintainer must supersede or remove
     the referrers first. The full artifact is snapshotted into the payload so
     the decided proposal and audit event record exactly what was removed.
+
+    `cascade=True` lifts that block by making the referrers part of the
+    proposal instead of a prerequisite for it: the required referrer edits
+    are recorded in the payload, the reviewer approves the whole set as one
+    decision, and `_approve_delete` re-derives and applies them before the
+    delete. Default off, so every existing caller keeps today's behaviour.
     """
     if target_kind not in _DELETE_KINDS:
         raise ProposalError(
@@ -521,18 +604,22 @@ def propose_delete(
     except ArtifactNotFoundError as e:
         raise ProposalError(f"unknown {target_kind} id: {target_id}") from e
     refs = referenced_by(store, target_kind, target_id)
-    if refs:
+    if refs and not cascade:
         hint = " (supersede it instead?)" if target_kind == "claim" else ""
         raise ProposalError(
             f"cannot delete {target_kind} {target_id}: referenced by "
             + ", ".join(refs)
             + hint
+            + " — or re-file with cascade to include the referrer edits "
+            "in this proposal (CLI: --cascade)"
         )
-    payload = {
+    payload: dict[str, Any] = {
         "target_kind": target_kind,
         "id": target_id,
         "snapshot": artifact.model_dump(mode="json"),
     }
+    if cascade:
+        payload["cascade"] = cascade_plan(store, target_kind, target_id)
     return _file_proposal(
         store, kind=ProposalKind.DELETE, payload=payload,
         proposed_by=proposed_by, session_id=session_id,
@@ -702,7 +789,7 @@ def auto_approve_receipts(
 
 def auto_approve_pending(
     store: KBStore, *, actor: str | None = None
-) -> list[Claim | Page | Entity | Relation]:
+) -> list[Claim | Page | Entity | Relation | Goal]:
     """Approve every pending proposal the configured gate allows.
 
     The full drain behind auto-approval-by-default. Under
@@ -713,7 +800,8 @@ def auto_approve_pending(
     closed instead of piling up; pages, entities and relations are approved
     unless something still blocks them. What stays pending is exactly the
     human-call residue: protected page kinds, pages with dead claim
-    references, an id already durable with different content, and DELETE
+    references, an id already durable (pages included — colliding page
+    proposals no longer overwrite via update_page), and DELETE
     proposals (retracting durable knowledge is never drained mechanically).
 
     Without trusted-agent this falls back to the receipt drain
@@ -724,7 +812,7 @@ def auto_approve_pending(
     review_cfg = _review_config(store)
     if review_cfg.get("approver_role") != "trusted-agent":
         return list(auto_approve_receipts(store, actor=actor))
-    approved: list[Claim | Page | Entity | Relation] = []
+    approved: list[Claim | Page | Entity | Relation | Goal] = []
     for proposal in store.list_proposals(ProposalStatus.PENDING):
         if proposal.kind == ProposalKind.DELETE:
             continue
@@ -794,10 +882,17 @@ def _payload_block_reason(
         except ValueError as e:
             return str(e)
     elif proposal.kind == ProposalKind.PAGE:
+        page_payload = dict(payload)
+        is_update = bool(page_payload.pop(_UPDATE_EXISTING_KEY, False))
         try:
-            page = Page(**payload)
+            page = Page(**page_payload)
         except (ValidationError, TypeError) as e:
             return f"invalid page payload: {e}"
+        if is_update:
+            try:
+                store.get_page(page.id)
+            except ArtifactNotFoundError:
+                return f"cannot update: page {page.id} does not exist"
         if not skip_dead_claim_refs:
             for cid in page.claims:
                 if not store._claim_path(cid).exists():
@@ -813,6 +908,21 @@ def _payload_block_reason(
             Entity(**payload)
         except (ValidationError, TypeError) as e:
             return f"invalid entity payload: {e}"
+    elif proposal.kind == ProposalKind.GOAL:
+        try:
+            goal = Goal(**payload)
+        except (ValidationError, TypeError) as e:
+            return f"invalid goal payload: {e}"
+        if goal.status is not GoalStatus.OPEN:
+            return (
+                f"goal {goal.id} would be approved into status "
+                f"{goal.status.value!r}; only 'open' may be approved — later "
+                "moves go through lifecycle.set_goal_status"
+            )
+        try:
+            store._validate_goal_refs(goal)
+        except ValueError as e:
+            return str(e)
     elif proposal.kind == ProposalKind.DELETE:
         target_kind = str(payload.get("target_kind", ""))
         target_id = str(payload.get("id", ""))
@@ -824,11 +934,15 @@ def _payload_block_reason(
         except ArtifactNotFoundError:
             return None  # already gone → idempotent approve is fine
         refs = referenced_by(store, target_kind, target_id)
-        if refs:
+        if refs and "cascade" not in payload:
             return (
                 f"cannot delete {target_kind} {target_id}: referenced by "
                 + ", ".join(refs)
             )
+        # A cascade proposal is *expected* to have referrers — unlinking them
+        # is what the reviewer approved. `_approve_delete` re-derives and
+        # applies the plan, then the approve-time `referenced_by` re-check
+        # still has to come back empty before anything is deleted.
     return None
 
 
@@ -858,7 +972,7 @@ def approve(
     approved_by: str,
     reason: str | None = None,
     drop_missing_claims: bool = False,
-) -> Claim | Page | Entity | Relation:
+) -> Claim | Page | Entity | Relation | Goal:
     """Approve a pending proposal and write it as a durable artifact.
 
     Raises ProposalError if the proposal is not pending or if
@@ -882,12 +996,16 @@ def approve(
     # Refuse to overwrite an existing artifact. Without this guard a retry
     # after a crash between put_<kind>() and move_proposal_to_decided() would
     # silently rewrite the artifact with new approved_by / created_at metadata.
-    # Exception: PAGE proposals may legitimately target an existing page when
-    # filed by vault_to_kb (vault edit flow) — the approve path handles that
-    # via update_page rather than put_page.
-    if proposal.kind not in (ProposalKind.PAGE, ProposalKind.DELETE):
+    # PAGE updates are opt-in via propose_page(update_existing=True) — used by
+    # vault_to_kb (#219). A bare colliding propose_page must not take the
+    # update_page path or durable content (and scope) is silently wiped.
+    is_page_update = (
+        proposal.kind == ProposalKind.PAGE
+        and bool(payload.get(_UPDATE_EXISTING_KEY))
+    )
+    if proposal.kind != ProposalKind.DELETE and not is_page_update:
         _ensure_no_existing_artifact(store, proposal.kind, payload["id"])
-    result: Claim | Page | Entity | Relation
+    result: Claim | Page | Entity | Relation | Goal
     if proposal.kind == ProposalKind.CLAIM:
         is_auto_approved = approved_by == proposal.proposed_by
         claim = Claim(
@@ -914,6 +1032,7 @@ def approve(
             if isinstance(payload.get("body"), str):
                 payload["body"] = strip_claim_markers(payload["body"], missing)
             dropped_claims = missing
+        is_update = bool(payload.pop(_UPDATE_EXISTING_KEY, False))
         page = Page(**payload)
         # Re-validate the kind at the gate: config may have tightened (or a
         # kind been removed) between propose and approve. Built-in kinds pass
@@ -927,15 +1046,11 @@ def approve(
             )
         except PageKindError as e:
             raise ProposalError(str(e)) from e
-        # Vault-edit proposals use slug_hint=page_id so the payload id matches
-        # an existing page. In that case update rather than create so the
-        # approve path doesn't raise "page already exists" for every normal
-        # vault edit. For new pages (no existing artifact) put_page is used
-        # as before.
-        try:
-            store.get_page(page.id)
+        # Opt-in update (vault edit) vs create. Existence for updates was
+        # already checked in _payload_block_reason / the collision guard.
+        if is_update:
             store.update_page(page)
-        except ArtifactNotFoundError:
+        else:
             store.put_page(page)
         with index_db.open_db(store.kb_dir) as conn:
             index_db.index_page(
@@ -957,6 +1072,10 @@ def approve(
                 type=entity.type.value, aliases=entity.aliases,
             )
         result = entity
+    elif proposal.kind == ProposalKind.GOAL:
+        goal = Goal(approved_by=approved_by, **payload)
+        store.put_goal(goal)
+        result = goal
     elif proposal.kind == ProposalKind.DELETE:
         result = _approve_delete(store, proposal, approved_by=approved_by)
     else:  # RELATION
@@ -1134,6 +1253,7 @@ _ARTIFACT_GETTERS = {
     ProposalKind.PAGE: "get_page",
     ProposalKind.ENTITY: "get_entity",
     ProposalKind.RELATION: "get_relation",
+    ProposalKind.GOAL: "get_goal",
 }
 
 
@@ -1145,6 +1265,39 @@ _DELETE_GETTERS = {
     "entity": "get_entity",
     "relation": "get_relation",
 }
+
+
+def _relation_endpoint_kind(store: KBStore, node_id: str) -> str | None:
+    """Resolve a bare relation endpoint id to an artifact kind.
+
+    Mirrors ``KBStore._node_exists`` priority (claim → page → entity →
+    source) so same-slug collisions pick a single kind. Used by
+    ``referenced_by`` so a claim↔claim edge cannot block deleting a page
+    that happens to share the slug (#663 / #600 carve-out).
+    """
+    if not node_id:
+        return None
+    if store._claim_path(node_id).exists():
+        return "claim"
+    if store._page_path(node_id).exists():
+        return "page"
+    if store._entity_path(node_id).exists():
+        return "entity"
+    if (store._source_dir(node_id) / "meta.yaml").exists():
+        return "source"
+    return None
+
+
+def _relation_refers_to(
+    store: KBStore, rel: Relation, target_kind: str, target_id: str,
+) -> bool:
+    """True when ``rel`` endpoints the target id *as* ``target_kind``."""
+    for endpoint in (rel.source, rel.target):
+        if endpoint == target_id and (
+            _relation_endpoint_kind(store, endpoint) == target_kind
+        ):
+            return True
+    return False
 
 
 def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]:
@@ -1165,11 +1318,8 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
         for page in store.list_pages():
             if target_id in page.claims:
                 refs.append(f"page {page.id!r}")
-        # relation endpoints are bare ids without a kind tag; a same-slug
-        # artifact of a different kind could match here. acceptable given the
-        # slug-collision caveat in the spec's "out of scope".
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
         for claim in store.list_claims():
             if claim.id == target_id:
@@ -1182,7 +1332,7 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
                 refs.append(f"claim {claim.id!r}")
     elif target_kind == "page":
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
     elif target_kind == "entity":
         for claim in store.list_claims():
@@ -1192,15 +1342,196 @@ def referenced_by(store: KBStore, target_kind: str, target_id: str) -> list[str]
             if target_id in page.entities:
                 refs.append(f"page {page.id!r}")
         for rel in store.list_relations():
-            if target_id in (rel.source, rel.target):
+            if _relation_refers_to(store, rel, target_kind, target_id):
                 refs.append(f"relation {rel.id!r}")
     # target_kind == "relation": edges have no inbound refs → refs stays empty
     return refs
 
 
+def _relation_cascade_steps(store: KBStore, target_id: str) -> list[dict[str, Any]]:
+    return [
+        {"kind": "relation", "id": rel.id, "action": "delete"}
+        for rel in store.list_relations()
+        if target_id in (rel.source, rel.target)
+    ]
+
+
+def cascade_plan(
+    store: KBStore, target_kind: str, target_id: str
+) -> list[dict[str, Any]]:
+    """The referrer edits that would let `target_id` be deleted.
+
+    Structured mirror of `referenced_by`, walked in the same order, so the
+    plan a reviewer approves lines up with the refusal that sent them here.
+    One step per referring artifact: a page citing the target in both its
+    frontmatter and its body is one decision, not two.
+
+    Pages and claims lose their pointer; relations are deleted outright,
+    because an edge whose endpoint is gone has no meaning. Relations carry
+    no inbound refs of their own (`referenced_by` returns [] for them), so
+    the walk is one level deep by construction — there is no transitive
+    cascade to bound.
+    """
+    if target_kind not in _DELETE_KINDS:
+        raise ProposalError(
+            f"unknown target_kind {target_kind!r}; expected one of "
+            f"{sorted(_DELETE_KINDS)}"
+        )
+    steps: list[dict[str, Any]] = []
+    if target_kind == "claim":
+        for page in store.list_pages():
+            if target_id in page.claims:
+                steps.append(
+                    {"kind": "page", "id": page.id, "unlink_claims": [target_id]}
+                )
+        steps.extend(_relation_cascade_steps(store, target_id))
+        for claim in store.list_claims():
+            if claim.id == target_id:
+                continue
+            step: dict[str, Any] = {"kind": "claim", "id": claim.id}
+            if target_id in claim.supersedes:
+                step["unlink_supersedes"] = [target_id]
+            if claim.superseded_by == target_id:
+                step["clear_superseded_by"] = True
+            if target_id in claim.contradicts:
+                step["unlink_contradicts"] = [target_id]
+            if len(step) > 2:
+                steps.append(step)
+    elif target_kind == "page":
+        steps.extend(_relation_cascade_steps(store, target_id))
+    elif target_kind == "entity":
+        for claim in store.list_claims():
+            if target_id in claim.entities:
+                steps.append(
+                    {"kind": "claim", "id": claim.id, "unlink_entities": [target_id]}
+                )
+        for page in store.list_pages():
+            if target_id in page.entities:
+                steps.append(
+                    {"kind": "page", "id": page.id, "unlink_entities": [target_id]}
+                )
+        steps.extend(_relation_cascade_steps(store, target_id))
+    return steps
+
+
+def _apply_cascade_page(
+    store: KBStore, step: dict[str, Any], step_id: str, *, actor: str
+) -> bool:
+    try:
+        page = store.get_page(step_id)
+    except ArtifactNotFoundError:
+        return False
+    claims = [c for c in step.get("unlink_claims") or [] if c in page.claims]
+    entities = [e for e in step.get("unlink_entities") or [] if e in page.entities]
+    if not claims and not entities:
+        return False
+    page.claims = [c for c in page.claims if c not in claims]
+    page.entities = [e for e in page.entities if e not in entities]
+    if claims:
+        # frontmatter and the inline [claim: …] markers both, or the body
+        # keeps rendering a citation whose claim no longer exists.
+        page.body = strip_claim_markers(page.body, claims)
+    page.updated_at = datetime.now(UTC)
+    store.update_page(page)
+    with index_db.open_db(store.kb_dir) as conn:
+        index_db.index_page(
+            conn, id=page.id, title=page.title, body=page.body,
+            type=page.type, tags=page.tags,
+        )
+    audit.log_event(
+        store.kb_dir, event="page.cascade_unlink", actor=actor,
+        object_ids=[page.id], data={"claims": claims, "entities": entities},
+        reversible=False,
+    )
+    return True
+
+
+def _apply_cascade_claim(
+    store: KBStore, step: dict[str, Any], step_id: str, *, actor: str
+) -> bool:
+    try:
+        claim = store.get_claim(step_id)
+    except ArtifactNotFoundError:
+        return False
+    supersedes = [c for c in step.get("unlink_supersedes") or [] if c in claim.supersedes]
+    contradicts = [
+        c for c in step.get("unlink_contradicts") or [] if c in claim.contradicts
+    ]
+    entities = [e for e in step.get("unlink_entities") or [] if e in claim.entities]
+    clear_superseded_by = (
+        bool(step.get("clear_superseded_by")) and claim.superseded_by is not None
+    )
+    if not (supersedes or contradicts or entities or clear_superseded_by):
+        return False
+    claim.supersedes = [c for c in claim.supersedes if c not in supersedes]
+    claim.contradicts = [c for c in claim.contradicts if c not in contradicts]
+    claim.entities = [e for e in claim.entities if e not in entities]
+    if clear_superseded_by:
+        claim.superseded_by = None
+    claim.updated_at = datetime.now(UTC)
+    store.update_claim(claim)
+    with index_db.open_db(store.kb_dir) as conn:
+        index_db.index_claim(
+            conn, id=claim.id, text=claim.text,
+            type=claim.type.value, status=claim.status.value, tags=claim.tags,
+        )
+    audit.log_event(
+        store.kb_dir, event="claim.cascade_unlink", actor=actor,
+        object_ids=[claim.id],
+        data={
+            "supersedes": supersedes, "contradicts": contradicts,
+            "entities": entities, "superseded_by_cleared": clear_superseded_by,
+        },
+        reversible=False,
+    )
+    return True
+
+
+def _apply_cascade(
+    store: KBStore, steps: list[dict[str, Any]], *, actor: str
+) -> list[str]:
+    """Apply an approved cascade's referrer edits. Returns the ids changed.
+
+    Runs *before* the target is deleted, so the approve-time `referenced_by`
+    gate below finds nothing and the delete proceeds — the gate is satisfied,
+    never bypassed. Every step is idempotent: a referrer that was already
+    edited or removed between propose and approve is skipped rather than
+    fatal, which is what makes a crash-retry of approve() safe.
+    """
+    changed: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        kind = str(step.get("kind", ""))
+        step_id = str(step.get("id", ""))
+        if not step_id:
+            continue
+        if kind == "relation":
+            try:
+                store.delete_relation(step_id)
+            except ArtifactNotFoundError:
+                continue
+            with index_db.open_db(store.kb_dir) as conn:
+                index_db.deindex(conn, kind="relation", id=step_id)
+            audit.log_event(
+                store.kb_dir, event="relation.delete", actor=actor,
+                object_ids=[step_id], data={"cascade": True}, reversible=False,
+            )
+        elif kind == "page":
+            if not _apply_cascade_page(store, step, step_id, actor=actor):
+                continue
+        elif kind == "claim":
+            if not _apply_cascade_claim(store, step, step_id, actor=actor):
+                continue
+        else:
+            continue
+        changed.append(step_id)
+    return changed
+
+
 def _reconstruct_deleted(
     target_kind: str, snapshot: dict[str, Any]
-) -> Claim | Page | Entity | Relation:
+) -> Claim | Page | Entity | Relation | Goal:
     """Rebuild a typed model from a delete proposal's snapshot.
 
     Used only on the idempotent path (artifact already gone) so the approve
@@ -1217,7 +1548,7 @@ def _reconstruct_deleted(
 
 def _approve_delete(
     store: KBStore, proposal: Proposal, *, approved_by: str
-) -> Claim | Page | Entity | Relation:
+) -> Claim | Page | Entity | Relation | Goal:
     """Execute an approved DELETE proposal: remove the artifact + index rows.
 
     Re-checks references at approve time (they may have appeared since the
@@ -1245,6 +1576,16 @@ def _approve_delete(
         with index_db.open_db(store.kb_dir) as conn:
             index_db.deindex(conn, kind=target_kind, id=target_id)
         return _reconstruct_deleted(target_kind, snapshot)
+    cascaded: list[str] = []
+    if "cascade" in payload:
+        # Re-derived here rather than replayed from the payload, for the same
+        # reason refs are re-checked: the KB may have moved since the proposal
+        # was filed. A referrer added after propose time is still unlinked; one
+        # removed since is simply absent from the new plan. The payload's copy
+        # stays as the reviewer-visible record of what they approved.
+        cascaded = _apply_cascade(
+            store, cascade_plan(store, target_kind, target_id), actor=approved_by
+        )
     refs = referenced_by(store, target_kind, target_id)
     if refs:
         raise ProposalError(
@@ -1255,9 +1596,12 @@ def _approve_delete(
     deleter(target_id)
     with index_db.open_db(store.kb_dir) as conn:
         index_db.deindex(conn, kind=target_kind, id=target_id)
+    data: dict[str, Any] = {"snapshot": snapshot}
+    if cascaded:
+        data["cascaded"] = cascaded
     audit.log_event(
         store.kb_dir, event=f"{target_kind}.delete", actor=approved_by,
-        object_ids=[target_id], data={"snapshot": snapshot}, reversible=False,
+        object_ids=[target_id], data=data, reversible=False,
     )
     return artifact
 

@@ -8,7 +8,9 @@ import pytest
 
 from vouch import sessions as sess_mod
 from vouch import themes
+from vouch.models import ArtifactScope, Visibility
 from vouch.proposals import ProposalError, approve, propose_claim, propose_entity
+from vouch.scoping import ViewerContext, is_visible, viewer_from
 from vouch.storage import KBStore
 
 
@@ -123,6 +125,66 @@ def test_detect_themes_excludes_archived(store: KBStore) -> None:
     assert len(result.clusters) == 0
 
 
+def test_detect_themes_excludes_claims_the_viewer_cannot_see(
+    store: KBStore,
+) -> None:
+    """A claim outside the viewer's scope must not reach a cluster."""
+    _seed_multi_session_claims(store)
+    # Re-stamp every claim private to an agent nobody is reading as.
+    for claim in store.list_claims():
+        claim.scope = ArtifactScope(visibility=Visibility.PRIVATE, agent="alice")
+        store.update_claim(claim)
+
+    viewer = viewer_from(config_path=store.config_path)
+    assert not [c for c in store.list_claims() if is_visible(c.scope, viewer)]
+
+    result = themes.detect_themes(store, min_sessions=1, min_claims=1)
+    assert result.clusters == []
+
+
+def test_detect_themes_honors_explicit_viewer(store: KBStore) -> None:
+    """The claim's own agent still sees it; a different agent does not."""
+    _seed_multi_session_claims(store)
+    for claim in store.list_claims():
+        claim.scope = ArtifactScope(visibility=Visibility.PRIVATE, agent="alice")
+        store.update_claim(claim)
+
+    alice = themes.detect_themes(
+        store, min_sessions=2, min_claims=2,
+        viewer=ViewerContext(agent="alice"),
+    )
+    assert [c.entities for c in alice.clusters], "alice owns these claims"
+
+    bob = themes.detect_themes(
+        store, min_sessions=1, min_claims=1, viewer=ViewerContext(agent="bob"),
+    )
+    assert bob.clusters == []
+
+
+def test_detect_themes_scope_leak_does_not_reach_a_theme_page(
+    store: KBStore,
+) -> None:
+    """Regression: the detector fed private claim ids into a durable page.
+
+    `propose_theme` writes `cluster.claim_ids` and `cluster.session_ids` into
+    the page body, so an unfiltered scan leaked them past the review gate as
+    committed yaml rather than as an advisory read.
+    """
+    _seed_multi_session_claims(store)
+    private_ids = set()
+    for claim in store.list_claims():
+        if "session-mgmt" in claim.entities:
+            continue
+        claim.scope = ArtifactScope(visibility=Visibility.PRIVATE, agent="alice")
+        store.update_claim(claim)
+        private_ids.add(claim.id)
+    assert private_ids
+
+    result = themes.detect_themes(store, min_sessions=1, min_claims=1)
+    for cluster in result.clusters:
+        assert not private_ids & set(cluster.claim_ids)
+
+
 def test_detect_themes_disabled_config(store: KBStore) -> None:
     """When themes.enabled=false in config, returns empty."""
     import yaml
@@ -134,6 +196,27 @@ def test_detect_themes_disabled_config(store: KBStore) -> None:
     result = themes.detect_themes(store, min_sessions=1, min_claims=1)
     assert len(result.clusters) == 0
     assert result.config_used.get("enabled") is False
+
+
+def test_detect_themes_quoted_false_does_not_enable(store: KBStore) -> None:
+    """Regression: bool(\"false\") is True, so a quoted themes.enabled
+    previously silently kept theme detection on (#648)."""
+    import yaml
+
+    _seed_multi_session_claims(store)
+    store.config_path.write_text(
+        (store.config_path.read_text(encoding="utf-8") or "")
+        + '\nthemes:\n  enabled: "false"\n',
+        encoding="utf-8",
+    )
+    result = themes.detect_themes(store, min_sessions=1, min_claims=1)
+    assert len(result.clusters) == 0
+    assert result.config_used.get("enabled") is False
+    # quoted true still enables
+    cfg = yaml.safe_load(store.config_path.read_text(encoding="utf-8")) or {}
+    cfg["themes"] = {"enabled": "true"}
+    store.config_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    assert themes._load_theme_config(store)["enabled"] is True
 
 
 def test_propose_theme(store: KBStore) -> None:
@@ -201,3 +284,70 @@ def test_detect_themes_top_k(store: KBStore) -> None:
     _seed_multi_session_claims(store)
     result = themes.detect_themes(store, min_sessions=1, min_claims=1, top_k=1)
     assert len(result.clusters) <= 1
+
+
+# --- archived theme pages are retired, not permanently taken (#704) ---------
+
+
+def _theme_page(store: KBStore, page_id: str, entities: list[str], status: str):
+    from vouch.models import Entity, EntityType, Page, PageStatus, PageType
+
+    for eid in entities:  # the write gate rejects dangling entity refs
+        store.put_entity(Entity(id=eid, name=eid, type=EntityType.CONCEPT))
+    return store.put_page(Page(
+        id=page_id, title=page_id, type=PageType.THEME, body="x",
+        entities=entities, status=PageStatus(status),
+    ))
+
+
+def test_an_archived_theme_page_no_longer_blocks_its_entity_set(
+    store: KBStore,
+) -> None:
+    """Regression for #704: archive is how an operator retires a wrong theme,
+    but the retired page kept contributing its entity set to the dedupe guard
+    — so that cluster could never be re-synthesized without hand-editing
+    storage."""
+    _theme_page(store, "theme-auth", ["a", "b"], "archived")
+    assert frozenset({"a", "b"}) not in themes._existing_theme_entity_sets(store)
+
+
+def test_a_live_theme_page_still_blocks_its_entity_set(store: KBStore) -> None:
+    _theme_page(store, "theme-auth", ["a", "b"], "active")
+    assert frozenset({"a", "b"}) in themes._existing_theme_entity_sets(store)
+
+
+def test_a_pending_theme_proposal_still_blocks(store: KBStore) -> None:
+    """Awaiting review is not retirement — two proposals for one cluster is
+    exactly the duplicate this guard exists to prevent."""
+    _seed_multi_session_claims(store)
+    result = themes.detect_themes(store, min_sessions=2, min_claims=2)
+    cluster = result.clusters[0]
+    themes.propose_theme(store, cluster, proposed_by="agent")
+    assert frozenset(cluster.entities) in themes._existing_theme_entity_sets(store)
+
+
+def test_archiving_a_theme_page_lets_detect_resurface_the_cluster(
+    store: KBStore,
+) -> None:
+    """The user-visible consequence, end to end: approve a theme, archive it,
+    and the cluster comes back as detectable."""
+    from vouch.models import PageStatus
+    from vouch.proposals import approve as approve_proposal
+
+    _seed_multi_session_claims(store)
+    cluster = themes.detect_themes(store, min_sessions=2, min_claims=2).clusters[0]
+    filed = themes.propose_theme(store, cluster, proposed_by="agent")
+    page = approve_proposal(store, filed["proposal_id"], approved_by="reviewer")
+
+    # while the page is live the cluster stays deduped away
+    still_gone = themes.detect_themes(store, min_sessions=2, min_claims=2)
+    assert not [
+        c for c in still_gone.clusters if set(c.entities) == set(cluster.entities)
+    ]
+
+    stored = store.get_page(page.id)
+    stored.status = PageStatus.ARCHIVED
+    store.update_page(stored)
+
+    back = themes.detect_themes(store, min_sessions=2, min_claims=2)
+    assert [c for c in back.clusters if set(c.entities) == set(cluster.entities)]

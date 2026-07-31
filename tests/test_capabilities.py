@@ -148,8 +148,11 @@ _CLI_MIRRORS = {
     "kb.reindex_embeddings": "reindex --embeddings",
     "kb.dedup_scan": "dedup",
     "kb.eval_embeddings": "eval embedding",
+    "kb.effectiveness": "eval effectiveness",
     "kb.graph_export": "graph",
     "kb.propose_theme": "detect-themes --propose",
+    "kb.list_goals": "goals",
+    "kb.set_goal_status": "goal-status",
 }
 
 

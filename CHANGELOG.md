@@ -7,6 +7,141 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **bench: composite guards** (#616): `efficiency`, `consistency` and `canary`
+  as bounded multipliers over the composite, plus a `bench_version` stamp on
+  every report. Reported **beside** the composite, never folded into it —
+  `composite` keeps its exact formula and meaning, so no recorded score or
+  ladder entry becomes incomparable, and `composite_guarded` is the new
+  measurement the ladder can adopt at a season boundary of the maintainer's
+  choosing. `run_seeds` tolerates a version-1 report with no guard block.
+  Measured on seeds 1-3: efficiency 0.88, consistency 1.00, canary **0.50 —
+  tripped on every seed** (leak rate 0.08-0.24), because a 10-item pack over
+  this corpus carries ~24% of it. That is the lever the guard exists to expose.
+- **pdf and audio sources — page and timestamp receipts** (#613): a spec, a
+  paper, a recorded call could not become citable material, because a receipt is
+  a byte span into a source's stored bytes and the bytes of a pdf or an mp3 do
+  not spell the sentence anyone wants to quote. `vouch source add spec.pdf` (or
+  `call.mp3`) now extracts the text layer / transcript, stores *that* as the
+  content-addressed artifact, and records a **coordinate map** alongside it, so
+  every existing path — ingest, the receipt gate, `kb.source_verify`, receipt
+  coverage — works on it unchanged while a verified receipt also resolves to
+  `p7` or `t=00:14:23` in the original. `vouch source locate <id> <quote>` prints
+  that coordinate; `--raw` registers the binary untouched. **No new hard
+  dependency**: pypdf is the optional `[pdf]` extra, imported lazily, and
+  transcription is a configured command (`sources.transcribe_cmd`, the
+  `compile.llm_cmd` pattern) so vouch never bundles a speech model. A scanned pdf
+  with no text layer fails loudly rather than registering an empty source — ocr
+  is out of scope. The original's sha256 is recorded, so `vouch source verify`
+  re-checks the pdf or the recording for drift instead of losing the link back to
+  it the way extracting by hand does.
+- **cascade delete — the referrers ride along in the proposal** (#600):
+  `kb.propose_delete(..., cascade=true)` and `vouch propose-delete --cascade`.
+  `referenced_by()` refuses a delete while anything still points at the target,
+  which is correct but leaves most of a compiled kb undeletable — pages cite
+  claims in bulk, and a supersede pair is *mutually* locked (`b` lists `a` in
+  `supersedes`, `a`'s `superseded_by` points back at `b`), so neither end of a
+  chain could ever be removed by any delete ordering. The gate is unchanged;
+  what changes is what the reviewer is asked to approve. With `cascade`, the
+  required referrer edits are recorded in the payload as a plan, and
+  `_approve_delete` **re-derives** that plan at approve time — the same posture
+  as the existing ref re-check — applies it, and only then deletes, so the
+  approve-time `referenced_by` gate still has to come back empty. Pages and
+  claims lose their pointer (frontmatter *and* the inline `[claim: …]` body
+  markers, via the same `strip_claim_markers` helper `wipe_dead_refs` uses);
+  relations are deleted outright, because an edge whose endpoint is gone has no
+  meaning, and relations carry no inbound refs of their own, so the walk is one
+  level deep by construction with no transitive cascade to bound. Every edit
+  lands its own irreversible audit event (`page.cascade_unlink`,
+  `claim.cascade_unlink`, `relation.delete`) and the `{kind}.delete` event names
+  what it touched. Additive and default-off: `cascade` omitted reproduces
+  today's behaviour exactly, and the refusal message now names the flag so the
+  dead end is discoverable.
+- **correction capture — the pushback becomes a proposal** (#430): the adapter
+  captured tool *outcomes* passively but never the single highest-signal event
+  in a session, the user correcting the agent ("no, we deploy from `main` not
+  `release`"). That evaporated unless someone remembered to propose a claim
+  afterwards. `kb.capture_correction` detects pushback on the turn boundary
+  with a cheap regex heuristic — no LLM call, deterministic — and files it as a
+  **pending** claim proposal tagged `auto:correction`, wired into the existing
+  `UserPromptSubmit` hook so it needs no new plumbing. It proposes and never
+  writes: the module routes exclusively through `proposals.propose_quoted_claim`
+  and has no import of `approve` at all. The claim cites a receipt — the user's
+  message is registered as a `message` source and the corrective sentence is
+  quoted verbatim out of it — so what reaches the queue is mechanically
+  verifiable rather than a paraphrase. Three guards bound an over-eager
+  heuristic: a per-session cap (`capture.correction.max_per_session`, default
+  3) counted from the queue so it survives a restart, lexical dedup against
+  approved claims and pending corrections folded together with the #147
+  embedding path, and secret masking before anything durable is written.
+  `capture.correction.enabled` (default true) gates it; declines report
+  `{"captured": false, "reason": ...}` rather than failing silently.
+  `vouch capture-correction`, plus MCP and JSONL.
+- **operator profile page** (#614): `vouch compile --profile` drafts a single
+  "how this operator works" page from approved claims and files it PENDING like
+  any other page. Selection is **opt-in, never inferred** — a claim qualifies by
+  carrying a `compile.profile_tags` tag (default `preference`, `convention`,
+  `decision`, `correction`) or by naming `compile.profile_entity`, not by
+  looking like a first-person sentence. The prompt forbids personality, trait
+  and psychometric inference outright, and every substantive sentence must cite
+  a claim or it is dropped, so the page can only ever restate what was already
+  approved. A draft citing anything outside the selected set is refused. A
+  refresh re-proposes rather than rewriting, so the history of what the system
+  believed about you stays auditable instead of being silently mutated.
+- **agent registry — who can write, and what each agent did** (#607):
+  `vouch agents list / show / pause / resume / revoke`, keyed on the
+  `auth_subject` hash `trust.py` already derives, so the committed
+  `.vouch/agents.yaml` holds names, status, scopes and claim dates while the
+  credential itself stays in local config. Pause and revoke are enforced at one
+  chokepoint (`trust.authorized_bearer_token`), so MCP-over-HTTP and
+  JSONL-over-HTTP inherit revocation without two implementations, and a denied
+  token is indistinguishable from a wrong one. Revocation is terminal by
+  design. `vouch agents show` replays every audit event an agent produced
+  alongside the control-plane transitions applied to it — the per-action
+  attribution ditto's own docs stop short of. Existing deployments are
+  unaffected: an unregistered token still authenticates as an unnamed active
+  agent, and a corrupted status fails closed rather than reading as active.
+- **first-class goals — review-gated in-flight objectives** (#427): vouch could
+  record everything a project *knows* and nothing about what it is *doing*, so
+  an agent re-orienting after a compaction recovered facts and decisions but
+  not intent ("mid-migration to typed config", "release blocked on the
+  audit-race fix") — that lived as prose in a session summary, unqueryable.
+  Adds a `Goal` artifact with a `GoalStatus` of `open` / `done` / `abandoned` /
+  `blocked`, taking the same route as every other write: `kb.propose_goal`
+  files a pending proposal, a human approves it, and the goal lands as diffable
+  yaml under `.vouch/goals/`. Approval is pinned to `open` — a proposal cannot
+  land a goal that is already `done`, which would put a transition on disk that
+  never passed the lifecycle path. Every later move goes through
+  `lifecycle.set_goal_status`, the single write path, which appends a
+  `goal.status` event to `audit.log.jsonl` and a row to the goal's own
+  append-only `history`. Open goals resurface oldest-first in `vouch digest`
+  and in the SessionStart recall digest, so a returning operator or a fresh
+  agent session sees what is in flight before it picks something up.
+  `vouch propose-goal`, `vouch goals`, `vouch goal-status`, plus MCP and JSONL.
+- **explicit pins — a working set that always enters the pack** (#615):
+  `vouch pin <id>` / `vouch pins list` / `vouch unpin <id>`. Pinned claims and
+  pages lead every context pack instead of having to win the query each turn,
+  which is what `hot_memory` and `salience` cannot do — they are recency-driven
+  and decay exactly when a long task needs them not to. Capped at
+  `retrieval.pins.budget_share` (default 0.3) so pins can never starve
+  retrieval, and de-duplicated against what retrieval already found. Pins are
+  **not a gate bypass and not a permission**: they point at already-approved
+  artifacts, and lifecycle and viewer scope are re-checked on every build, so a
+  pinned claim that is later superseded/archived/redacted — or one the scope
+  filter hides — stops being injected. Shared pins live in committed
+  `.vouch/pins.yaml`; `--local` keeps a personal set in gitignored
+  `.vouch/pins.local.yaml`. `--expires` drops a pin automatically, applied on
+  read so building a pack never writes.
+- **`kb.effectiveness` — is this claim earning its keep?** (#426): a read-only,
+  measurement-only signal ranking approved artifacts by how the sessions they
+  were surfaced into ended. Per artifact it reports good/bad session counts, an
+  associational lift against the corpus baseline, and a 95% Wilson interval.
+  Verdicts are power-gated — `useful` / `harmful` only when the interval clears
+  the baseline *and* the sample meets `--min-samples`, otherwise `unverified` /
+  `insufficient`, so an untrustworthy number never renders as a confident one.
+  Built on the existing `retrieval_events` surfacing log and the audit stream;
+  no new derived table, nothing written, and a bad verdict never expires
+  anything. `vouch eval effectiveness [--window 90d] [--min-samples N]
+  [--format text|json]`, plus MCP and JSONL.
 - **`kb.explain_ranking` — why a result ranked where it did** (#432): a
   read-only breakdown of the retrieval pipeline. Per candidate it reports the
   lexical (FTS5) rank, the semantic rank, the RRF contribution, a row for every
@@ -20,6 +155,195 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`extract` no longer fractures file paths/URLs into auto-approved
+  garbage claims** (#702): the sentence segmenter only skipped a `.` as a
+  boundary when it was flanked by digits on both sides (decimals/versions
+  like `6.8.3`) — every other non-whitespace-flanked period, e.g. in
+  `src/vouch/cli.py`, `cli.py:2550`, or `github.com`, still split the
+  sentence. `segment_source` has no coherence check afterward, only
+  length/letter-ratio filters, so the resulting shards (`"see the
+  changelog at github."`) got auto-approved via `propose_quoted_claim`'s
+  receipt gate as first-class claims. The lookaround is now
+  non-whitespace-flanked rather than digit-only, so a period only ends a
+  segment when followed by whitespace or end-of-string.
+- **vault sync no longer clobbers a second, distinct vault edit made while
+  the first edit's proposal is still pending**: `_has_pending_page_proposal`
+  dedup-checked pending proposals by page id alone, so re-running
+  `vault_to_kb` after a *different* edit to an already-pending page
+  silently skipped filing a new proposal instead of recognizing the edit
+  as distinct. The second edit was never captured in any proposal, and
+  the next backward sync pass then overwrote the vault mirror with the
+  KB's still-unapproved-first-edit content, discarding the second edit
+  with no trace and no error. Now keyed on the content-address (sha256)
+  of the whole edit rather than the page id alone, matching how sources
+  are already fingerprinted elsewhere, so a second distinct edit correctly
+  files its own proposal instead of being coalesced into the first.
+- **`kb.experts` no longer leaks out-of-scope claims into entity rankings**
+  (#714): `rank_experts` aggregated evidence density over every claim in
+  the KB with no viewer/scope filtering at all, unlike every sibling
+  claim-aggregating read surface (`context.py`, `graph.py`, `digest.py`,
+  `health.py`, `compile.py`, and `themes.detect_themes`, the closest
+  shape-wise sibling). A `project`- or `agent`-scoped claim the caller
+  cannot otherwise retrieve still inflated `claim_count`, `citation_count`,
+  and `score`, and could surface verbatim in `top_claim_ids` — handing the
+  caller a claim id it cannot fetch. `rank_experts` now takes an optional
+  `viewer` (defaulting to `scoping.viewer_from(...)`, matching
+  `detect_themes`) and filters through `scoping.is_visible` before a claim
+  can contribute anything, with the FTS candidate fetch run through
+  `scoping.scoped_fetch_limit` so a mostly-out-of-scope KB doesn't starve
+  the candidate pool before the filter runs.
+- **`vouch render-wiki` drops archived pages** (#695):
+  `render_wiki_cmd` passed every on-disk page into index/MOC, so retired
+  titles kept wiki links after archive. the CLI now filters to the same
+  live set as recall / digest / search.
+- **session-split ignores archived pages in TAKEN TOPICS / collisions** (#712):
+  prompts and `_file_drafts` treated every on-disk page as taken, so archiving
+  a session summary permanently blocked redraft under the same title. Both
+  now reuse `compile._live_pages` (same live set as compile post-#700).
+- **`kb.neighbors` drops archived pages** (#696):
+  `_neighbor_ok` already filtered retracted claims but accepted any
+  on-disk page, so archived titles still appeared in neighbors while
+  context-pack expansion dropped them via `_page_is_live`. pages now
+  use the same live check.
+- **`kb.neighbors` no longer leaks edges pointing at excluded nodes**
+  (#716): `find_neighbors` appended an edge to the response before
+  checking whether its other endpoint passed the same
+  retrievability/existence gate that decides node inclusion
+  (`_neighbor_ok` / `_node_kind`). superseded, archived, and redacted
+  claims — and missing nodes — were correctly excluded from `nodes`, but
+  the edge pointing at them still went out, so a response could contain
+  an edge whose `target` referenced an id the response itself said didn't
+  exist. `kb.neighbors` shares this code path across all three surfaces
+  (MCP, JSONL, CLI), so the leak was identical everywhere. an edge is now
+  only recorded once its other endpoint has been accepted into the
+  visited set — either already, or just now by passing the same gate.
+- **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
+  (#543 reopened, root-caused): both functions' own docstrings promise to
+  remove every embedding row for a reindex or a deleted artifact, but
+  neither ever touched the legacy `embeddings` table alongside
+  `embedding_index` — a leaked row permanently tripped `fsck`'s
+  `orphan_embedding` warning with no way to clear it via reindexing, and
+  grew `state.db` unbounded over a KB's lifetime.
+- **`recall`/`capture` no longer crash on malformed numeric config
+  values** (#488 reopened, root-caused): both `load_config()` functions
+  passed `max_chars`/`min_observations`/`dedup_window_seconds` straight
+  through bare `int()`/`float()`, raising on a config typo (e.g.
+  `max_chars: "12,000"`) instead of falling back to the default like the
+  same module's `enabled` boolean already does — and since
+  `recall.load_config` backs the SessionStart hook, one bad value took
+  down recall-digest injection on every new session. `compile.py`'s own
+  `_coerce()` already implemented this fail-soft contract for its numeric
+  fields; it's now the shared `coerce_numeric()` in `config_coerce.py`
+  (alongside `coerce_bool()`), used by all three modules.
+- **`kb.confirm`-ing a claim no longer drops it from the hot-memory
+  sidebar** (#520 reopened, root-caused): `_is_active` listed only
+  `WORKING`/`STABLE`/`CONTESTED` as live statuses, omitting `ACTIONABLE`
+  — the status `lifecycle.confirm()`'s first confirmation moves a
+  `WORKING` claim to. A claim disappeared from `_meta.vouch_hot_memory`
+  the moment it was confirmed, and a fresh KB's onboarding seed claim
+  (filed `ACTIONABLE` from birth) never appeared at all. `_is_active` is
+  now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
+  `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
+  pattern, so a future status addition defaults to active.
+)
+- **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
+  `_list_decided` parsed every decided proposal strictly, so a single bad file
+  aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
+  same resilience as `list_proposals` / `list_pages`.
+- **rerank / recency / triage quoted `"true"` stays off** (#658):
+  `retrieval.rerank.enabled`, `retrieval.recency.enabled` and
+  `triage.enabled` were the last three readers still on the
+  isinstance/`bool()` pattern, so a quoted `enabled: "true"` fell through to
+  `False` while the sibling values (`top_k`, `half_life_days`) parsed fine
+  and the block looked configured. all three now go through `coerce_bool`,
+  finishing the migration `#620` started for `pages_first` in the same file
+  and `#648` continued for themes / reflex. note the fail direction is the
+  opposite of `#648`'s: there a quoted `"false"` left a feature on, here a
+  quoted `"true"` left it off.
+- **`hub_client` ETag lookup is now case-insensitive** (#662): `_request`
+  flattened `resp.headers` (case-insensitive by design) into a plain
+  `dict`, so `pull()`'s `resp_headers.get("ETag")` silently returned
+  `None` whenever a hub or intermediary sent the header as `etag` rather
+  than the exact literal `ETag`. That cleared `link.last_bundle_id`,
+  permanently defeating `If-None-Match` dedup — every subsequent
+  `vouch hub pull` re-downloaded the whole bundle and re-filed every
+  claim as a fresh pending proposal, indefinitely. Header keys are now
+  lower-cased on the way into the dict, and the one consuming lookup
+  matches.
+- **kind-aware relation match in `referenced_by`** (#663):
+  relation endpoints are bare ids, so a claim↔claim edge on slug
+  `auth` also blocked deleting a page (or entity) that shared the
+  slug. the gate now resolves each endpoint to a kind (same priority
+  as `_node_exists`) and only counts the relation when it matches the
+  delete target's kind. the #600 cascade option is unchanged.
+- **security: koth strategy sandbox now blocks filesystem mutation, not
+  just `open`-writes** (#660): `_install_audit_hook` blocked `open()` in a
+  write mode, but never the separate CPython audit events `os.remove`,
+  `os.rename` (and `os.replace`), `os.mkdir`, `os.rmdir`, `os.link`,
+  `os.symlink`, `os.chmod`, `os.truncate` — so untrusted competition
+  strategy code could delete, rename, or create files/directories despite
+  the sandbox's documented claim to block "filesystem writes." Confirmed
+  end-to-end: a strategy's `rank()` could silently delete an arbitrary
+  file via `os.remove` with no error, timeout, or blocked-call signal.
+  All eight events now hit the same blocklist as `open`-writes.
+- **`kb.detect_themes` no longer leaks claim and session ids the viewer
+  cannot retrieve** (#657): the detector filtered claims on status and
+  `approved_by` but never on `ArtifactScope`, so a private or cross-project
+  claim contributed its id — and the session that produced it — to a
+  returned `ThemeCluster`. `propose_theme` writes both lists into the theme
+  page body, so the leak became committed yaml on approval rather than
+  stopping at a response. `detect_themes` now filters through
+  `scoping.is_visible` like `kb.recall` and the salience sidebar already do,
+  and takes an optional `viewer` for callers that carry one.
+- **security: empty-quote receipts no longer clear the auto-approve gate**
+  (#513 reopened, root-caused): `verify_receipt` and `verify_evidence` both
+  guarded only on `quote is None`, not an empty string. An `Evidence` with
+  `quote=""` and a zero-length span (`byte_start == byte_end`) decodes to
+  `""`, trivially string-equals the empty quote, and returned `VERIFIED` —
+  so a claim citing only a forged, content-free receipt cleared
+  `evaluate_claim_receipts` and, with `review.auto_approve_on_receipt`
+  (the starter-config default), landed as a durable, approved claim with
+  zero real evidentiary backing. `Evidence.quote` carries no min-length
+  constraint at the model layer and `bundle`/`sync` intake write incoming
+  Evidence straight to disk after schema validation only, so this was
+  reachable from a hand-crafted bundle or a malicious federation peer, not
+  just the normal propose path (which already routes through
+  `locate_span`'s existing empty-quote guard on the *mint* side). Both
+  guards now reject an empty quote the same way `locate_span` already
+  does, closing the gap on the *verify* side.
+- **`notify sweep`'s backlog alert re-arms after dropping below threshold**
+  (#652): the `queue.backlogged` idempotence marker was a one-way latch,
+  cleared only when the pending queue reached exactly zero — not when it
+  dropped back under `backlog_threshold`. A queue that drained partway and
+  grew again (the common shape of a real backlog) never re-alerted after
+  the first trip. The marker now clears per-hook as soon as the count
+  falls under threshold, so the next crossing fires again.
+- **`kb.explain_ranking` no longer leaks status-filtered candidate text**
+  (#650): a retracted/superseded/redacted claim or archived page correctly
+  reported `gate: "status-filtered"`, but its `summary` was still sourced
+  from the pre-status-filter candidate set, so the full text came back
+  anyway. `#640` fixed the equivalent leak for scope-filtered candidates;
+  this extends the same withholding to the status gate — summaries now
+  come from the post-status-filter set, matching what `kb.search` and
+  `kb.context` already exclude.
+- **themes / salience quoted `"false"` disables** (#648):
+  `themes.enabled` and `retrieval.reflex.enabled` still used the
+  isinstance/bool fail-open pattern, so a quoted `enabled: "false"`
+  silently kept both features on. both now go through `coerce_bool`
+  (same fix class as enrich / hooks / split).
+- **`mask_secrets` now catches underscore-adjacent credential key names**
+  (#646): the `\b` word boundaries around the keyword alternation treat `_`
+  as a word character, so `access_token=`, `client_secret=`, `DB_PASSWORD=`,
+  and `AWS_SECRET_ACCESS_KEY=` — the dominant real-world naming shape for
+  these env-vars — passed through unmasked. switched to explicit
+  alphanumeric lookaround so underscore-delimited segments match while
+  substrings like `tokenized=` stay excluded. affects both the capture-time
+  guard and the `vouch redact` remediation backstop, which share the regex.
+- **triage ignores archived twins for duplication** (#638):
+  claim/page pools used every approved artifact, so an archived claim
+  (or archived page title) with the same text forced `duplication_risk=1.0`
+  and an advisory reject on re-file. pools and embedding hits now skip
+  retracted claims and archived pages, matching search/recall/digest.
 - **`setup_repo_guards.sh` no longer requires checks that cannot report**:
   `#630` removed the `trust-gate` workflow and the coderabbit gate removed
   `coderabbit-approved`, but both contexts stayed in the script's
@@ -34,11 +358,25 @@ All notable changes to vouch are documented here. Format follows
   `prompt_gate_cfg` still used bare `bool()`, so a quoted
   `enabled: "false"` silently turned those features *on*. both now
   use `coerce_bool`.
+- **a zero `tail` on `kb.audit` returns no events, not every event**: the
+  window was `events[-tail:]`, and `-0` is `0`, so asking for zero events
+  sliced from the start and handed back the whole visible log — a negative
+  tail dropped that many off the front and returned the rest. all three
+  surfaces (mcp, jsonl, cli) now share `audit.tail_events`, so the clamp
+  cannot drift between them. `retrieval_events.read_events` carried the same
+  `[-limit:]` boundary and is fixed with it.
 - **digest drops archived followup pages** (#625):
   `followups_due` already skipped `done`/`dropped` metadata, but an
   `ARCHIVED` page with `followup_status=open` and a past `due_at` still
   appeared every morning — stale claims were filtered, pages were not.
   mirror recall: archived followups leave the due list.
+- **`kb.explain_ranking` no longer returns the summary of a scope-filtered
+  candidate**: the report listed every candidate the pipeline saw, sourcing
+  summaries from the pre-scope fused set, so a viewer got back the claim text
+  of artifacts `kb.search` and `kb.context` withhold for that same viewer — the
+  opposite of the module's stated scoping invariant. the candidate is still
+  listed with its `scope-filtered` gate, since naming the gate that hid it is
+  the point of the report; only the summary is withheld.
 - **`verify_all` / `doctor` treat missing externals like drift** (#622):
   `vouch source verify` already marked `external_status=missing` as `!`,
   but `verify_all`'s audit `failed` list and `health.doctor` only looked
@@ -89,6 +427,13 @@ All notable changes to vouch are documented here. Format follows
   markers; absolute bench scores shift, paired comparisons were fair
   either way. the reference baseline table is refreshed.
 ### Changed
+- **capture.realtime defaults off** (#602):
+  per-tool `PostToolUse` observe is opt-in. when off (the new default),
+  `capture observe` no-ops with `{"skipped": "realtime-disabled"}` and
+  SessionEnd rebuilds tool activity from the Claude transcript so
+  `min_observations` still works. shipped claude-code hooks drop
+  PostToolUse/Stop; re-install does not prune old hooks from existing
+  `settings.json`. set `capture.realtime: true` to restore the buffer.
 - **core PRs can auto-merge, on two mechanical bars.** the blanket "core
   is never armed" refusal is gone; both authorization surfaces (the
   `auto-merge` label and the `/auto-merge` comment) now route through one
@@ -131,6 +476,18 @@ All notable changes to vouch are documented here. Format follows
   behind `vouch review`.
 
 ### Added
+- **bench: four derivation categories** (#617): `passive-consolidation`,
+  `multi-hop-relational`, `temporal-depth` and `aggregation`. Each asks for a
+  fact stated in no single claim, so an expected-answer substring check is
+  impossible; they are graded on a new `MemoryCase.required` — every
+  supporting part must reach the pack inside the budget. The generators draw
+  from a derived rng and their own pools, so the ten existing categories
+  produce byte-identical datasets and reproduce their recorded per-category
+  scores exactly; only the composite moves (0.58 → 0.64) because four rows
+  joined the mean. Measured on stock config: consolidation, temporal-depth and
+  aggregation at 1.00 (win condition W3 wanted > 0.5 against ditto's 0.00),
+  `multi-hop-relational` at 0.17 — the new lever, where a three-link chain
+  loses a link because no hop shares a term with the question.
 - **shipped ranking champion** (`vouch.strategies.provenance`): the
   engine-lane winner (provenance-aware ranking — hearsay and stored
   instructions demoted, change-of-state phrasing boosted) now ships in
