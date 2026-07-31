@@ -698,6 +698,17 @@ def test_observations_from_transcript_edge_paths(
     monkeypatch.setattr("vouch.transcript.parse_codex_transcript", _boom)
     assert cap.observations_from_transcript(broken) == []
 
+    # non-dict parse result is skipped (host-neutral loop continue)
+    monkeypatch.setattr(
+        "vouch.transcript.parse_claude_transcript",
+        lambda _p, **_k: ["not", "a", "dict"],
+    )
+    monkeypatch.setattr(
+        "vouch.transcript.parse_codex_transcript",
+        lambda _p, **_k: {"messages": []},
+    )
+    assert cap.observations_from_transcript(broken) == []
+
     def _odd(_path, **_kwargs):
         return {
             "messages": [
@@ -735,6 +746,37 @@ def test_observations_from_transcript_edge_paths(
     assert len(obs) == 1
     assert obs[0]["tool"] == "Bash"
     assert obs[0]["summary"].startswith("Command failed:")
+
+    # Codex mapper path: failed shell output rewrites summary via
+    # _observation_from_call (summarize_tool does not know exec_command).
+    def _codex_fail(_path, **_kwargs):
+        return {
+            "messages": [
+                {
+                    "blocks": [
+                        {
+                            "type": "tool_use",
+                            "name": "exec_command",
+                            "input": {"arguments": '{"cmd": "pytest -q"}'},
+                            "result": {
+                                "content": "failed: 1 error",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        "vouch.transcript.parse_claude_transcript", _boom,
+    )
+    monkeypatch.setattr(
+        "vouch.transcript.parse_codex_transcript", _codex_fail,
+    )
+    failed = cap.observations_from_transcript(broken)
+    assert len(failed) == 1
+    assert failed[0]["tool"] == "Bash"
+    assert failed[0]["summary"].startswith("Command failed:")
 
 
 def test_observe_cli_skips_when_realtime_disabled(

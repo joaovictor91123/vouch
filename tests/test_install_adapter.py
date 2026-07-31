@@ -242,6 +242,64 @@ def test_settings_json_merge_prunes_retired_observe_hooks(tmp_path: Path) -> Non
     assert ".claude/settings.json" in result.merged
 
 
+def test_prune_retired_vouch_hooks_edge_shapes() -> None:
+    """Cover non-string commands, malformed groups, and untouched groups."""
+    from vouch.install_adapter import (
+        _is_retired_vouch_hook_command,
+        _prune_retired_vouch_hooks,
+    )
+
+    assert _is_retired_vouch_hook_command(None) is False
+    assert _is_retired_vouch_hook_command(42) is False
+    assert _is_retired_vouch_hook_command("vouch capture observe") is True
+
+    dst = {
+        "hooks": {
+            "PostToolUse": [
+                "not-a-group",
+                {"matcher": "*", "hooks": "not-a-list"},
+                {
+                    "matcher": "Edit",
+                    "hooks": [
+                        {"type": "command", "command": "user-only-hook"},
+                        {"type": "command", "command": None},
+                    ],
+                },
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "vouch capture observe || true",
+                        },
+                    ],
+                },
+            ],
+            "Stop": "not-a-list",
+        },
+    }
+    assert _prune_retired_vouch_hooks(dst) is True
+    post = dst["hooks"]["PostToolUse"]
+    assert "not-a-group" in post
+    assert {"matcher": "*", "hooks": "not-a-list"} in post
+    assert any(
+        isinstance(g, dict)
+        and g.get("matcher") == "Edit"
+        and any(h.get("command") == "user-only-hook" for h in g["hooks"])
+        for g in post
+    )
+    assert not any(
+        isinstance(g, dict)
+        and isinstance(g.get("hooks"), list)
+        and any(
+            isinstance(h, dict) and "vouch capture observe" in str(h.get("command"))
+            for h in g["hooks"]
+        )
+        for g in post
+    )
+    assert dst["hooks"]["Stop"] == "not-a-list"
+
+
 def test_settings_json_merge_is_idempotent(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))

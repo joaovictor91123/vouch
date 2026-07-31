@@ -741,7 +741,7 @@ def _prune_retired_vouch_hooks(dst: dict[str, Any]) -> bool:
             if not kept:
                 # drop the whole group when it only held retired vouch hooks
                 continue
-            if kept is not hook_list:
+            if len(kept) != len(hook_list):
                 refreshed = {k: v for k, v in group.items() if k != "hooks"}
                 refreshed["hooks"] = kept
                 new_groups.append(refreshed)
