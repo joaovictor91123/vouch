@@ -7,6 +7,16 @@ All notable changes to vouch are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **bench: composite guards** (#616): `efficiency`, `consistency` and `canary`
+  as bounded multipliers over the composite, plus a `bench_version` stamp on
+  every report. Reported **beside** the composite, never folded into it —
+  `composite` keeps its exact formula and meaning, so no recorded score or
+  ladder entry becomes incomparable, and `composite_guarded` is the new
+  measurement the ladder can adopt at a season boundary of the maintainer's
+  choosing. `run_seeds` tolerates a version-1 report with no guard block.
+  Measured on seeds 1-3: efficiency 0.88, consistency 1.00, canary **0.50 —
+  tripped on every seed** (leak rate 0.08-0.24), because a 10-item pack over
+  this corpus carries ~24% of it. That is the lever the guard exists to expose.
 - **pdf and audio sources — page and timestamp receipts** (#613): a spec, a
   paper, a recorded call could not become citable material, because a receipt is
   a byte span into a source's stored bytes and the bytes of a pdf or an mp3 do
