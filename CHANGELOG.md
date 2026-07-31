@@ -106,6 +106,20 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.experts` no longer leaks out-of-scope claims into entity rankings**
+  (#714): `rank_experts` aggregated evidence density over every claim in
+  the KB with no viewer/scope filtering at all, unlike every sibling
+  claim-aggregating read surface (`context.py`, `graph.py`, `digest.py`,
+  `health.py`, `compile.py`, and `themes.detect_themes`, the closest
+  shape-wise sibling). A `project`- or `agent`-scoped claim the caller
+  cannot otherwise retrieve still inflated `claim_count`, `citation_count`,
+  and `score`, and could surface verbatim in `top_claim_ids` — handing the
+  caller a claim id it cannot fetch. `rank_experts` now takes an optional
+  `viewer` (defaulting to `scoping.viewer_from(...)`, matching
+  `detect_themes`) and filters through `scoping.is_visible` before a claim
+  can contribute anything, with the FTS candidate fetch run through
+  `scoping.scoped_fetch_limit` so a mostly-out-of-scope KB doesn't starve
+  the candidate pool before the filter runs.
 - **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
   (#543 reopened, root-caused): both functions' own docstrings promise to
   remove every embedding row for a reindex or a deleted artifact, but
