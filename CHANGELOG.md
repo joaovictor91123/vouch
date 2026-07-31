@@ -45,6 +45,17 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`extract` no longer fractures file paths/URLs into auto-approved
+  garbage claims** (#702): the sentence segmenter only skipped a `.` as a
+  boundary when it was flanked by digits on both sides (decimals/versions
+  like `6.8.3`) — every other non-whitespace-flanked period, e.g. in
+  `src/vouch/cli.py`, `cli.py:2550`, or `github.com`, still split the
+  sentence. `segment_source` has no coherence check afterward, only
+  length/letter-ratio filters, so the resulting shards (`"see the
+  changelog at github."`) got auto-approved via `propose_quoted_claim`'s
+  receipt gate as first-class claims. The lookaround is now
+  non-whitespace-flanked rather than digit-only, so a period only ends a
+  segment when followed by whitespace or end-of-string.
 - **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
   `_list_decided` parsed every decided proposal strictly, so a single bad file
   aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
