@@ -93,6 +93,9 @@ def test_find_neighbors_excludes_superseded_claims(store: KBStore) -> None:
     result = graph.find_neighbors(store, "new", depth=1)
     assert {n["id"] for n in result["nodes"]} == set()
     assert "old" not in {n["id"] for n in result["nodes"]}
+    # the SUPERSEDES relation lifecycle.supersede() creates must not leak as
+    # a dangling edge to a node the response itself excluded.
+    assert result["edges"] == []
 
 
 def test_find_neighbors_unknown_node_raises(store: KBStore) -> None:
