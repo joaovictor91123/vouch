@@ -62,7 +62,7 @@ from .capabilities import capabilities as build_caps
 from .context import build_context_pack
 from .lifecycle import LifecycleError
 from .logging_config import configure_logging
-from .models import Proposal, ProposalKind, ProposalStatus
+from .models import PageStatus, Proposal, ProposalKind, ProposalStatus
 from .onboarding import (
     DEFAULT_TEMPLATE,
     TEMPLATES,
@@ -3408,7 +3408,9 @@ def render_wiki_cmd(out_dir: str | None) -> None:
     With --out, writes index.md and MOC.md there; otherwise prints the index.
     """
     store = _load_store()
-    pages = store.list_pages()
+    # same live set as recall / digest / search — archived pages stay on disk
+    # but are out of the wiki front door (#695).
+    pages = [p for p in store.list_pages() if p.status is not PageStatus.ARCHIVED]
     index = wiki_render_mod.render_index(pages)
     if out_dir is None:
         _echo(index)
