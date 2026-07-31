@@ -106,6 +106,10 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`vouch render-wiki` drops archived pages** (#695):
+  `render_wiki_cmd` passed every on-disk page into index/MOC, so retired
+  titles kept wiki links after archive. the CLI now filters to the same
+  live set as recall / digest / search.
 - **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
   (#543 reopened, root-caused): both functions' own docstrings promise to
   remove every embedding row for a reindex or a deleted artifact, but
@@ -134,6 +138,7 @@ All notable changes to vouch are documented here. Format follows
   now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
   `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
   pattern, so a future status addition defaults to active.
+)
 - **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
   `_list_decided` parsed every decided proposal strictly, so a single bad file
   aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
