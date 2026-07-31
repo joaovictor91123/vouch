@@ -175,6 +175,38 @@ def test_context_expand_graph_adds_neighbors(store: KBStore) -> None:
     assert any("graph expansion" in w for w in pack["warnings"])
 
 
+def test_kb_context_mcp_honors_graph_rel_types(
+    store: KBStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the mcp kb_context tool must accept graph_rel_types like the jsonl handler
+    # and kb_neighbors do, so an agent can scope the graph walk to specific
+    # relation types. this surface silently dropped the filter.
+    from vouch.server import kb_context
+
+    src = store.put_source(b"e")
+    store.put_entity(Entity(id="auth", name="Auth", type=EntityType.SYSTEM))
+    store.put_entity(Entity(id="risk", name="Risk", type=EntityType.SYSTEM))
+    store.put_claim(Claim(id="jwt-claim", text="JWT tokens secure the API", evidence=[src.id]))
+    store.put_relation(
+        Relation(
+            id="c-ref-auth", source="jwt-claim", relation=RelationType.REFERENCES, target="auth"
+        )
+    )
+    store.put_relation(
+        Relation(
+            id="c-blk-risk", source="jwt-claim", relation=RelationType.BLOCKS, target="risk"
+        )
+    )
+    health.rebuild_index(store)
+    monkeypatch.chdir(store.root)
+
+    pack = kb_context("JWT tokens", limit=5, expand_graph=True, graph_rel_types=["references"])
+
+    ids = {it["id"] for it in pack["items"]}
+    assert "auth" in ids  # the references edge is followed
+    assert "risk" not in ids  # the blocks edge is filtered out by graph_rel_types
+
+
 def test_context_expand_graph_includes_page_claims(store: KBStore) -> None:
     src = store.put_source(b"e")
     store.put_claim(Claim(id="c1", text="detail fact", evidence=[src.id]))
