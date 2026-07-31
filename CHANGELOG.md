@@ -106,6 +106,17 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`recall`/`capture` no longer crash on malformed numeric config
+  values** (#488 reopened, root-caused): both `load_config()` functions
+  passed `max_chars`/`min_observations`/`dedup_window_seconds` straight
+  through bare `int()`/`float()`, raising on a config typo (e.g.
+  `max_chars: "12,000"`) instead of falling back to the default like the
+  same module's `enabled` boolean already does — and since
+  `recall.load_config` backs the SessionStart hook, one bad value took
+  down recall-digest injection on every new session. `compile.py`'s own
+  `_coerce()` already implemented this fail-soft contract for its numeric
+  fields; it's now the shared `coerce_numeric()` in `config_coerce.py`
+  (alongside `coerce_bool()`), used by all three modules.
 - **`kb.confirm`-ing a claim no longer drops it from the hot-memory
   sidebar** (#520 reopened, root-caused): `_is_active` listed only
   `WORKING`/`STABLE`/`CONTESTED` as live statuses, omitting `ACTIONABLE`
