@@ -106,6 +106,18 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **vault sync no longer clobbers a second, distinct vault edit made while
+  the first edit's proposal is still pending**: `_has_pending_page_proposal`
+  dedup-checked pending proposals by page id alone, so re-running
+  `vault_to_kb` after a *different* edit to an already-pending page
+  silently skipped filing a new proposal instead of recognizing the edit
+  as distinct. The second edit was never captured in any proposal, and
+  the next backward sync pass then overwrote the vault mirror with the
+  KB's still-unapproved-first-edit content, discarding the second edit
+  with no trace and no error. Now keyed on the content-address (sha256)
+  of the whole edit rather than the page id alone, matching how sources
+  are already fingerprinted elsewhere, so a second distinct edit correctly
+  files its own proposal instead of being coalesced into the first.
 - **`kb.experts` no longer leaks out-of-scope claims into entity rankings**
   (#714): `rank_experts` aggregated evidence density over every claim in
   the KB with no viewer/scope filtering at all, unlike every sibling
