@@ -109,6 +109,18 @@ def test_stale_page_flagged_past_threshold(store: KBStore) -> None:
     assert ("stale_page", ("ancient",)) in codes
 
 
+def test_stale_page_check_handles_naive_datetime(store: KBStore) -> None:
+    """A page's updated_at can be timezone-naive (e.g. hand-written YAML, or
+    an older on-disk page predating a tz-aware write path) — the staleness
+    check must normalize it to UTC rather than raising on the naive/aware
+    comparison."""
+    naive_old = datetime.now() - timedelta(days=400)  # no tzinfo
+    _page(store, "ancient", "Ancient", "# Ancient\n\nold content.", updated_at=naive_old)
+    report = wiki_lint(store, stale_after_days=180)
+    codes = {(f.code, tuple(f.object_ids)) for f in report.findings}
+    assert ("stale_page", ("ancient",)) in codes
+
+
 def test_recently_updated_page_is_not_stale(store: KBStore) -> None:
     recent = datetime.now(UTC) - timedelta(days=5)
     _page(store, "fresh", "Fresh", "# Fresh\n\nnew content.", updated_at=recent)
@@ -176,3 +188,41 @@ def test_jsonl_wiki_lint_honors_stale_days_param(
     )
     codes = {f["code"] for f in resp["result"]["findings"]}
     assert "stale_page" in codes
+
+
+def test_mcp_surface_serves_wiki_lint(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    from vouch import server
+
+    _page(store, "lonely", "Lonely", "# Lonely\n\nno links here at all in this page.")
+    monkeypatch.setattr(server, "_store", lambda: store)
+
+    result = server.kb_wiki_lint()
+    direct = wiki_lint(store)
+    assert result["ok"] == direct.ok
+    assert {f["code"] for f in result["findings"]} == {f.code for f in direct.findings}
+    assert result["counts"] == direct.counts
+
+
+def test_cli_wiki_lint(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    _page(store, "lonely", "Lonely", "# Lonely\n\nno links here at all in this page.")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["wiki-lint"])
+    assert result.exit_code == 0, result.output
+    assert "orphan_page" in result.output
+
+
+def test_cli_wiki_lint_clean_kb(store: KBStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    from click.testing import CliRunner
+
+    from vouch.cli import cli
+
+    monkeypatch.chdir(store.root)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["wiki-lint"])
+    assert result.exit_code == 0, result.output
+    assert "clean" in result.output
