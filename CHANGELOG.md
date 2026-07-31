@@ -106,6 +106,11 @@ All notable changes to vouch are documented here. Format follows
   artifact the caller could not already retrieve, and it touches no write path.
 
 ### Fixed
+- **`kb.neighbors` drops archived pages** (#696):
+  `_neighbor_ok` already filtered retracted claims but accepted any
+  on-disk page, so archived titles still appeared in neighbors while
+  context-pack expansion dropped them via `_page_is_live`. pages now
+  use the same live check.
 - **`reset()`/`deindex()` now clear the legacy `embeddings` table too**
   (#543 reopened, root-caused): both functions' own docstrings promise to
   remove every embedding row for a reindex or a deleted artifact, but
@@ -134,6 +139,7 @@ All notable changes to vouch are documented here. Format follows
   now the complement of the retired statuses (`SUPERSEDED`/`ARCHIVED`/
   `REDACTED`), matching `context.py`'s `_RETRACTED_CLAIM_STATUSES`
   pattern, so a future status addition defaults to active.
+)
 - **`vouch stats` / `kb.stats` no longer crash on one corrupt `decided/*.yaml`**:
   `_list_decided` parsed every decided proposal strictly, so a single bad file
   aborted `review_summary` / `collect_stats`. It now uses `_load_or_skip` —
